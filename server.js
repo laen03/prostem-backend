@@ -53,7 +53,8 @@ app.post(
       phone,
       birthDate,
       institution,
-      interests,
+      teachingLevel,
+      specializations,
     } = request.body;
 
     try {
@@ -79,7 +80,7 @@ app.post(
         await file.makePublic();
         photoURL = file.publicUrl();
       }
-      const parsedInterests = JSON.parse(interests || "[]");
+      const parsedSpecializations = JSON.parse(specializations || "[]");
       await db.collection("users").doc(userRecord.uid).set({
         email,
         name,
@@ -88,7 +89,8 @@ app.post(
         phone,
         birthDate,
         institution,
-        interests: parsedInterests,
+        teachingLevel,
+        specializations: parsedSpecializations,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         active: true,
         myEvents: null,
@@ -111,7 +113,14 @@ app.post(
   "/api/signUp-Google",
   upload.single("photo"),
   async (request, response) => {
-    const { idToken, phone, birthDate, institution, interests } = request.body;
+    const {
+      idToken,
+      phone,
+      birthDate,
+      institution,
+      teachingLevel,
+      specializations,
+    } = request.body;
 
     try {
       // 1. Verify the idToken with Firebase
@@ -140,7 +149,7 @@ app.post(
       }
 
       //Save data to Firestore
-      const parsedInterests = JSON.parse(interests || "[]");
+      const parsedSpecializations = JSON.parse(specializations || "[]");
       await db.collection("users").doc(uid).set({
         email,
         name,
@@ -149,7 +158,8 @@ app.post(
         phone,
         birthDate,
         institution,
-        interests: parsedInterests,
+        teachingLevel,
+        specializations: parsedSpecializations,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         active: true,
         myEvents: null,
@@ -232,22 +242,31 @@ app.post("/api/create-event", async (request, response) => {
   try {
     const {
       capacity,
-      date,
       description,
+      durationHours,
+      endDate,
       endTime,
+      enrollmentType,
       place,
+      specialties,
+      startDate,
       startTime,
       title,
       virtualEvent,
     } = request.body;
 
+    //const parsedSpecialties = JSON.parse(specialties || "[]");
     const eventData = {
       attendees: {},
       capacity: Number(capacity),
-      date,
       description,
+      durationHours,
+      endDate,
       endTime,
+      enrollmentType,
       place,
+      specialties,
+      startDate,
       registeredUsers: [],
       startTime,
       survey: null,
@@ -264,7 +283,7 @@ app.post("/api/create-event", async (request, response) => {
 });
 
 //GET ALL EVENTS
-app.get("/api/get-events", async (request, response) => {
+app.get("/api/events", async (request, response) => {
   try {
     const eventsSnapshot = await db.collection("events").get();
     const events = eventsSnapshot.docs.map((doc) => ({
@@ -278,23 +297,76 @@ app.get("/api/get-events", async (request, response) => {
   }
 });
 
+//GET EVENT BY ID
+app.get("/api/events/:id", async (request, response) => {
+  const eventId = request.params.id;
+
+  if (!eventId) {
+    return response
+      .status(400)
+      .json({ error: "El ID del evento es obligatorio" });
+  }
+
+  try {
+    const eventDoc = await db.collection("events").doc(eventId).get();
+
+    if (!eventDoc.exists) {
+      return response.status(404).json({ error: "Evento no encontrado" });
+    }
+
+    const eventData = { id: eventDoc.id, ...eventDoc.data() };
+    return response.status(200).json(eventData);
+  } catch (error) {
+    console.error("Error al obtener el evento:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+//EDIT SINGLE EVENT
+app.put("/api/edit-event/:id", async (request, response) => {
+  const eventId = request.params.id;
+  const updatedData = request.body;
+
+  if (!eventId) {
+    return response
+      .status(400)
+      .json({ error: "El ID del evento es obligatorio" });
+  }
+
+  try {
+    const docRef = db.collection("events").doc(eventId);
+    await docRef.update(updatedData);
+    return response
+      .status(200)
+      .json({ message: "Evento actualizado correctamente" });
+  } catch (error) {
+    console.error("Error al actualizar el evento:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+app.delete("/api/delete-event/:id", async (request, response) => {
+  const eventId = request.params.id;
+
+  if (!eventId) {
+    return response
+      .status(400)
+      .json({ error: "El ID del evento es obligatorio" });
+  }
+
+  try {
+    const docRef = db.collection("events").doc(eventId);
+    await docRef.delete();
+    return response
+      .status(200)
+      .json({ message: "Evento eliminado correctamente" });
+  } catch (error) {
+    console.error("Error al eliminar el evento:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
 //#################################################################################################
-
-// // DELETE USER
-// app.delete("/api/delete-user/:id", async (request, response) => {
-//   try {
-//     const userID = request.params.id;
-
-//     const userDocRef = db.collection("users").doc(userID);
-//     await userDocRef.delete();
-
-//     return response.status(200).send();
-//   } catch (error) {
-//     console.log(error);
-//     //return response.status(500).json({ error: error.message });
-//     return response.status(500).send(error);
-//   }
-// });
 
 app.listen(PORT, (error) => {
   if (error) console.log("There was an error:", error);
