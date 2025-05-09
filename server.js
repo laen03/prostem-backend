@@ -209,7 +209,7 @@ app.post("/api/signIn-Google", async (request, response) => {
 
   if (!idToken) {
     console.log("No token");
-    return res.status(400).json({ message: "Token no proporcionado" });
+    return response.status(400).json({ message: "Token no proporcionado" });
   }
   try {
     const decodedToken = await admin.auth().verifyIdToken(idToken);
@@ -345,6 +345,7 @@ app.put("/api/edit-event/:id", async (request, response) => {
   }
 });
 
+//DELETE SINGLE EVENT
 app.delete("/api/delete-event/:id", async (request, response) => {
   const eventId = request.params.id;
 
@@ -366,27 +367,448 @@ app.delete("/api/delete-event/:id", async (request, response) => {
   }
 });
 
+//REGISTER TO AN EVENT
+app.post("/api/register-to-event/:id", async (request, response) => {
+  const userId = request.body.userId;
+  const eventId = request.params.id;
+
+  if (!userId || !eventId) {
+    return response
+      .status(400)
+      .json({ error: "userId y eventId son obligatorios" });
+  }
+
+  try {
+    const eventRef = db.collection("events").doc(eventId);
+    const userRef = db.collection("users").doc(userId);
+
+    const eventDoc = await eventRef.get();
+    const userDoc = await userRef.get();
+
+    if (!eventDoc.exists) {
+      return response.status(404).json({ error: "Evento no encontrado" });
+    }
+
+    if (!userDoc.exists) {
+      return response.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const eventData = eventDoc.data();
+    const registeredUsers = eventData.registeredUsers || [];
+    const capacity = eventData.capacity || null;
+
+    // Verify if it's already registerd
+    if (registeredUsers.includes(userId)) {
+      return response
+        .status(400)
+        .json({ error: "Ya estás inscrito en este evento." });
+    }
+
+    // Validate limited capacity
+    if (capacity && registeredUsers.length >= capacity) {
+      return response.status(400).json({ error: "El evento ya está lleno." });
+    }
+
+    // Register the user to the event
+    await eventRef.update({
+      registeredUsers: admin.firestore.FieldValue.arrayUnion(userId),
+    });
+
+    // Add the event to the user's myEvents list
+    await userRef.update({
+      myEvents: admin.firestore.FieldValue.arrayUnion(eventId),
+    });
+
+    return response.status(200).json({ message: "Inscripción exitosa" });
+  } catch (error) {
+    console.error("Error al registrar al usuario en el evento:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+//REGISTER TO AN EVENT
+app.post("/api/unregister-from-event/:id", async (request, response) => {
+  const userId = request.body.userId;
+  const eventId = request.params.id;
+
+  if (!userId || !eventId) {
+    return response
+      .status(400)
+      .json({ error: "userId y eventId son obligatorios" });
+  }
+
+  try {
+    const eventRef = db.collection("events").doc(eventId);
+    const userRef = db.collection("users").doc(userId);
+
+    const eventDoc = await eventRef.get();
+    const userDoc = await userRef.get();
+
+    if (!eventDoc.exists) {
+      return response.status(404).json({ error: "Evento no encontrado" });
+    }
+    if (!userDoc.exists) {
+      return response.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const eventData = eventDoc.data();
+    const eventStartDate = eventData.startDate;
+    const now = new Date();
+    // Check that start date is in the future
+    if (new Date(eventStartDate) <= now) {
+      return response.status(400).json({
+        error:
+          "No puedes desinscribirte después de que el evento haya iniciado.",
+      });
+    }
+
+    // Verify the user is already registered.
+    const registeredUsers = eventData.registeredUsers || [];
+    if (!registeredUsers.includes(userId)) {
+      return response
+        .status(400)
+        .json({ error: "No estás inscrito en este evento." });
+    }
+
+    // Quitar usuario del evento
+    await eventRef.update({
+      registeredUsers: admin.firestore.FieldValue.arrayRemove(userId),
+    });
+
+    // Quitar evento del usuario
+    await userRef.update({
+      myEvents: admin.firestore.FieldValue.arrayRemove(eventId),
+    });
+
+    return response.status(200).json({ message: "Desinscripción exitosa" });
+  } catch (error) {
+    console.error("Error al desinscribirse:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+//REQUEST REGISTRATION (FOR RESTRICTED EVENTS)
+app.post("/api/request-registration/:id", async (request, response) => {
+  const userId = request.body.userId;
+  const eventId = request.params.id;
+
+  if (!userId || !eventId) {
+    return response
+      .status(400)
+      .json({ error: "userId y eventId son obligatorios" });
+  }
+
+  try {
+    const eventRef = db.collection("events").doc(eventId);
+    const userRef = db.collection("users").doc(userId);
+
+    const eventDoc = await eventRef.get();
+    const userDoc = await userRef.get();
+
+    if (!eventDoc.exists) {
+      return response.status(404).json({ error: "Evento no encontrado" });
+    }
+
+    if (!userDoc.exists) {
+      return response.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const eventData = eventDoc.data();
+    const registeredUsers = eventData.registeredUsers || [];
+    const pendingRequests = eventData.pendingRequests || [];
+
+    // Alredy registered
+    if (registeredUsers.includes(userId)) {
+      return response
+        .status(400)
+        .json({ error: "Ya estás inscrito en este evento." });
+    }
+
+    // Already requested to register
+    if (pendingRequests.includes(userId)) {
+      return response
+        .status(400)
+        .json({ error: "Ya has solicitado inscripción a este evento." });
+    }
+
+    const userData = userDoc.data();
+    const userName = `${userData.name} ${userData.lastName1 || ""} ${
+      userData.lastName2 || ""
+    }`.trim();
+
+    // Add to the pending request list
+    await eventRef.update({
+      pendingRequests: admin.firestore.FieldValue.arrayUnion({
+        uid: userId,
+        name: userName,
+        // email: userData.email,
+        // institution: userData.institution,
+      }),
+    });
+
+    return response
+      .status(200)
+      .json({ message: "Solicitud enviada con éxito." });
+  } catch (error) {
+    console.error("Error al solicitar inscripción:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+//PROCESS REGISTRATION REQUEST
+app.post(
+  "/api/process-registration/:eventId/:userId",
+  async (request, response) => {
+    const { eventId, userId } = request.params;
+    const action = request.body.action; // "approve" or "reject"
+
+    if (!userId || !eventId || !action) {
+      return response
+        .status(400)
+        .json({ error: "eventId, userId y action son obligatorios" });
+    }
+
+    if (!["approve", "reject"].includes(action)) {
+      return response.status(400).json({ error: "Acción inválida" });
+    }
+
+    try {
+      const eventRef = db.collection("events").doc(eventId);
+      const userRef = db.collection("users").doc(userId);
+
+      const eventDoc = await eventRef.get();
+      const userDoc = await userRef.get();
+
+      if (!eventDoc.exists) {
+        return response.status(404).json({ error: "Evento no encontrado" });
+      }
+      if (!userDoc.exists) {
+        return response.status(404).json({ error: "Usuario no encontrado" });
+      }
+
+      const eventData = eventDoc.data();
+      const updatedPending = eventData.pendingRequests.filter(
+        (req) => req.uid !== userId
+      );
+      const registeredUsers = eventData.registeredUsers || [];
+      const capacity = eventData.capacity || null;
+
+      const hasRequest = eventData.pendingRequests.some(
+        (req) => req.uid === userId
+      );
+
+      if (!hasRequest) {
+        return response
+          .status(400)
+          .json({ error: "El usuario no tiene una solicitud pendiente." });
+      }
+
+      if (action === "approve") {
+        // Validate if the event has limited capacity
+        if (capacity && registeredUsers.length >= capacity) {
+          return response
+            .status(400)
+            .json({ error: "El evento ya está lleno." });
+        }
+
+        // Aprove
+        await eventRef.update({
+          registeredUsers: admin.firestore.FieldValue.arrayUnion(userId),
+          pendingRequests: updatedPending,
+        });
+
+        // Add event to the user's event history
+        await userRef.update({
+          myEvents: admin.firestore.FieldValue.arrayUnion(eventId),
+        });
+
+        return response
+          .status(200)
+          .json({ message: "Solicitud aprobada exitosamente." });
+      } else if (action === "reject") {
+        // Reject
+        await eventRef.update({
+          pendingRequests: updatedPending,
+        });
+
+        return response
+          .status(200)
+          .json({ message: "Solicitud rechazada exitosamente." });
+      }
+    } catch (error) {
+      console.error("Error al procesar inscripción:", error);
+      return response.status(500).json({ error: "Error interno del servidor" });
+    }
+  }
+);
+
+//ADD USER TO WAITING LIST
+app.post(
+  "/api/add-user-to-waiting-list/:eventId",
+  async (request, response) => {
+    const eventId = request.params.eventId;
+    const userId = request.body.userId;
+
+    if (!eventId || !userId) {
+      return response
+        .status(400)
+        .json({ error: "eventId y userId son obligatorios." });
+    }
+
+    try {
+      const eventRef = db.collection("events").doc(eventId);
+      const userRef = db.collection("users").doc(userId);
+
+      const eventDoc = await eventRef.get();
+      const userDoc = await userRef.get();
+
+      if (!eventDoc.exists) {
+        return response.status(404).json({ error: "Evento no encontrado." });
+      }
+      if (!userDoc.exists) {
+        return response.status(404).json({ error: "Usuario no encontrado." });
+      }
+
+      const eventData = eventDoc.data();
+      const registeredUsers = eventData.registeredUsers || [];
+      const pendingRequests = eventData.pendingRequests || [];
+      const waitingList = eventData.waitingList || [];
+
+      // Verify is it's already registered or pending
+      if (registeredUsers.includes(userId)) {
+        return response
+          .status(400)
+          .json({ error: "Ya estás inscrito en este evento." });
+      }
+      if (pendingRequests.some((req) => req.uid === userId)) {
+        return response
+          .status(400)
+          .json({ error: "Ya has enviado una solicitud para este evento." });
+      }
+
+      if (waitingList.some((user) => user.uid === userId)) {
+        return response
+          .status(400)
+          .json({ error: "Ya estás en la lista de espera." });
+      }
+
+      const userData = userDoc.data();
+      const userName = `${userData.name} ${userData.lastName1 || ""} ${
+        userData.lastName2 || ""
+      }`.trim();
+
+      // Add to the waiting list
+      await eventRef.update({
+        waitingList: admin.firestore.FieldValue.arrayUnion({
+          uid: userId,
+          name: userName,
+        }),
+      });
+
+      return response
+        .status(200)
+        .json({ message: "Te has unido a la lista de espera." });
+    } catch (error) {
+      console.error("Error al unirse a la lista de espera:", error);
+      return response
+        .status(500)
+        .json({ error: "Error interno del servidor." });
+    }
+  }
+);
+
+// PROCESS WAITING LIST REQUEST
+app.post(
+  "/api/process-waiting-list/:eventId/:userId",
+  async (request, response) => {
+    const { eventId, userId } = request.params;
+    const action = request.body.action; // "approve" or "reject"
+
+    if (!userId || !eventId || !action) {
+      return response
+        .status(400)
+        .json({ error: "eventId, userId y action son obligatorios" });
+    }
+
+    if (!["approve", "reject"].includes(action)) {
+      return response.status(400).json({ error: "Acción inválida" });
+    }
+
+    try {
+      const eventRef = db.collection("events").doc(eventId);
+      const userRef = db.collection("users").doc(userId);
+
+      const eventDoc = await eventRef.get();
+      const userDoc = await userRef.get();
+
+      if (!eventDoc.exists) {
+        return response.status(404).json({ error: "Evento no encontrado" });
+      }
+      if (!userDoc.exists) {
+        return response.status(404).json({ error: "Usuario no encontrado" });
+      }
+
+      const eventData = eventDoc.data();
+      const updatedWaitingList = eventData.waitingList.filter(
+        (req) => req.uid !== userId
+      );
+      const registeredUsers = eventData.registeredUsers || [];
+      const capacity = eventData.capacity || null;
+
+      const isUserInWaitingList = eventData.waitingList.some(
+        (req) => req.uid === userId
+      );
+
+      if (!isUserInWaitingList) {
+        return response
+          .status(400)
+          .json({ error: "El usuario no está en la lista de espera." });
+      }
+
+      if (action === "approve") {
+        // Verificar si hay cupo en el evento
+        if (capacity && registeredUsers.length >= capacity) {
+          return response.status(400).json({
+            error:
+              "El evento ya está lleno, no se puede aprobar la inscripción.",
+          });
+        }
+
+        // Aprobar y mover a la lista de registrados
+        await eventRef.update({
+          registeredUsers: admin.firestore.FieldValue.arrayUnion(userId),
+          waitingList: updatedWaitingList, // Eliminar de la lista de espera
+        });
+
+        // Añadir el evento al historial de eventos del usuario
+        await userRef.update({
+          myEvents: admin.firestore.FieldValue.arrayUnion(eventId),
+        });
+
+        return response.status(200).json({
+          message:
+            "Solicitud de lista de espera aprobada. Usuario registrado al evento.",
+        });
+      } else if (action === "reject") {
+        // Rechazar y eliminar de la lista de espera
+        await eventRef.update({
+          waitingList: updatedWaitingList,
+        });
+
+        return response.status(200).json({
+          message: "Solicitud de lista de espera rechazada exitosamente.",
+        });
+      }
+    } catch (error) {
+      console.error("Error al procesar la lista de espera:", error);
+      return response.status(500).json({ error: "Error interno del servidor" });
+    }
+  }
+);
+
 //#################################################################################################
 
 app.listen(PORT, (error) => {
   if (error) console.log("There was an error:", error);
   console.log(`App available on http://localhost:${PORT} `);
 });
-
-// const role = "admin";
-// const data = {
-//   active: true,
-//   birthDate: "1999-10-30",
-//   email: "mtrevino@tec.ac.cr",
-//   insitutution: "ITCR",
-//   insterests: [],
-//   lastname1: "Treviño",
-//   lastname2: "Villalobos",
-//   myEvents: [],
-//   name: "Marlen",
-//   password: "123456",
-//   phone: "",
-//   photo: "",
-//   role: role,
-//   uid: "",
-// };
