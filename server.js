@@ -806,6 +806,175 @@ app.post(
   }
 );
 
+//GET ALL USERS
+app.get("/api/users", async (request, response) => {
+  try {
+    const usersSnapshot = await db.collection("users").get();
+    const users = usersSnapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    response.status(200).json(users);
+  } catch (error) {
+    console.error("Error al obtener los usuarios:", error);
+    response.status(500).json({ message: "Error al obtener los usuarios" });
+  }
+});
+
+//GET USER BY ID
+
+//CHANGE USER ROL
+app.put("/api/update-user-role/:id", async (request, response) => {
+  const userID = request.params.id;
+  const roleSent = request.body;
+
+  if (!userID) {
+    return response
+      .status(400)
+      .json({ error: "El ID del usuario es obligatorio" });
+  }
+
+  const validRoles = ["admin", "user"];
+  if (!validRoles.includes(roleSent.role)) {
+    return response.status(400).json({ error: "¡Rol inválido!" });
+  }
+
+  try {
+    const userRef = db.collection("users").doc(userID);
+    await userRef.update({ role: roleSent.role });
+    return response
+      .status(200)
+      .json({ message: "Rol actualizado correctamente." });
+  } catch (error) {
+    console.error("Error al actualizar el rol del usuario:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+//DELETE USER
+app.delete("/api/delete-user/:id", async (request, response) => {
+  const userId = request.params.id;
+
+  if (!userId) {
+    return response
+      .status(400)
+      .json({ error: "El ID del usuario es obligatorio" });
+  }
+
+  console.log(userId);
+  try {
+    //Delete from the users collection
+    const docRef = db.collection("users").doc(userId);
+    await docRef.delete();
+
+    // Delete user from Firebase Authentication
+    await admin.auth().deleteUser(userId);
+    console.log(
+      `Usuario con UID ${userId} eliminado de Firebase Authentication`
+    );
+
+    // Get events to search for the user
+    const eventsRef = db.collection("events");
+    const querySnapshot = await eventsRef.get();
+
+    const promises = querySnapshot.docs.map(async (doc) => {
+      const eventData = doc.data();
+
+      // Delete the user's UID from 'registeredUsers', 'pendingRequests' and 'waitingList' if it exists.
+      let updateData = {};
+
+      // Delete from 'registeredUsers'
+      if (
+        eventData.registeredUsers &&
+        eventData.registeredUsers.includes(userId)
+      ) {
+        console.log("Esta registrado en", eventData.title);
+        updateData.registeredUsers =
+          admin.firestore.FieldValue.arrayRemove(userId);
+      }
+
+      // Delete from 'pendingRequests'
+      const pendingToRemove = eventData.pendingRequests?.find(
+        (request) => request.uid === userId
+      );
+      if (pendingToRemove) {
+        updateData.pendingRequests =
+          admin.firestore.FieldValue.arrayRemove(pendingToRemove);
+      }
+
+      // Delete from 'waitingList'
+      const waitingToRemove = eventData.waitingList?.find(
+        (request) => request.uid === userId
+      );
+      if (waitingToRemove) {
+        updateData.waitingList =
+          admin.firestore.FieldValue.arrayRemove(waitingToRemove);
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await doc.ref.update(updateData);
+      }
+    });
+
+    // Wait for all Promises to be done
+    await Promise.all(promises);
+
+    return response.status(200).json({
+      message:
+        "Usuario eliminado correctamente. Referencias en eventos actualizadas.",
+    });
+  } catch (error) {
+    console.error("Error al eliminar el usuario:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
+
+//CREATE SURVEY
+app.post("/api/create-survey", async (request, response) => {
+  try {
+    const survey = request.body;
+
+    if (!survey?.title || !survey?.pages?.[0]?.questions?.length) {
+      return response.status(400).json({ message: "Datos incompletos" });
+    }
+
+    const docRef = await db.collection("surveys").add({
+      ...survey,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      answers: [],
+    });
+
+    response.status(201).json({ id: docRef.id });
+  } catch (error) {
+    console.error("Error al guardar encuesta:", error);
+    response.status(500).json({ message: "Error interno del servidor" });
+  }
+});
+
+//GET SURVEYS
+app.get("/api/surveys/:id", async (request, response) => {
+  const { id } = request.params;
+
+  try {
+    const doc = await db.collection("surveys").doc(id).get();
+
+    if (!doc.exists) {
+      return response.status(404).json({ message: "Encuesta no encontrada" });
+    }
+
+    return response.status(200).json(doc.data());
+  } catch (error) {
+    console.error("Error al obtener la encuesta:", error);
+    response.status(500).json({ message: "Error interno del servidor" });
+  }
+});
+
+//GET SURVEYS BY ID
+
+//DELETE SURVEY
+
+//STATISTICS
+
 //#################################################################################################
 
 app.listen(PORT, (error) => {
