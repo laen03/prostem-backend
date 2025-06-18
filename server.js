@@ -3,6 +3,7 @@ const admin = require("./firebase-admin");
 const cors = require("cors");
 const app = express();
 const multer = require("multer");
+const { DateTime } = require("luxon");
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -15,6 +16,9 @@ const bucket = admin
   .bucket("gs://prostem-db-68733.firebasestorage.app");
 
 //File middleware
+const sharp = require("sharp");
+const resizeValue = 100; // This is to help save space on Firebase Storage.
+const qualityValue = 65; // From 0 to 100
 const upload = multer({ storage: multer.memoryStorage() });
 
 function getFullNameFromToken(decodedTokenName) {
@@ -37,6 +41,52 @@ function getFullNameFromToken(decodedTokenName) {
   }
 
   return { name, lastName1, lastName2 };
+}
+
+async function compressProfilePicture(multerFile, userUID) {
+  //Compress the image
+  const compressedImageBuffer = await sharp(multerFile.buffer)
+    .resize(resizeValue)
+    .webp({ quality: qualityValue })
+    .toBuffer();
+
+  const fileName = `profilePictures/${userUID}`;
+  const fileInBucket = bucket.file(fileName);
+
+  await fileInBucket.save(compressedImageBuffer, {
+    metadata: {
+      contentType: "image/webp",
+    },
+  });
+  // This makes the file public
+  // TODO: use signed tokens if privacy is needed
+  await fileInBucket.makePublic();
+  return fileInBucket.publicUrl();
+}
+
+async function deleteCollectionInBatchesIterative(
+  collectionRef,
+  batchSize = 500
+) {
+  let deletedCount = 0;
+
+  while (true) {
+    const snapshot = await collectionRef.limit(batchSize).get();
+
+    if (snapshot.empty) {
+      break;
+    }
+
+    const batch = db.batch();
+    snapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+
+    await batch.commit();
+    deletedCount += snapshot.size;
+
+    console.log(`Eliminados ${deletedCount} documentos de la subcolección...`);
+  }
 }
 
 //SIGN UP WITH EMAIL & PASSWORD
@@ -67,16 +117,22 @@ app.post(
 
       let photoURL = null;
       if (request.file) {
-        const fileName = `profilePictures/${userRecord.uid}`;
+        //Compress the image
+        const compressedImageBuffer = await sharp(request.file.buffer)
+          .resize(resizeValue)
+          .webp({ quality: qualityValue })
+          .toBuffer();
+
+        const fileName = `profilePictures/${userRecord.uid}.jpg`;
         const file = bucket.file(fileName);
 
-        await file.save(request.file.buffer, {
+        await file.save(compressedImageBuffer, {
           metadata: {
-            contentType: request.file.mimetype,
+            contentType: "image/webp",
           },
         });
         // This makes the file public
-        //TODO: use signed tokens if privacy is needed
+        // TODO: use signed tokens if privacy is needed
         await file.makePublic();
         photoURL = file.publicUrl();
       }
@@ -103,7 +159,6 @@ app.post(
     } catch (error) {
       console.error("Error adding user:", error);
       return response.status(400).json({ error: error.message });
-      //return response.status(400).send({ error: error.message });
     }
   }
 );
@@ -253,6 +308,8 @@ app.post("/api/create-event", async (request, response) => {
       startTime,
       title,
       virtualEvent,
+      evaluationType,
+      eventCategory,
     } = request.body;
 
     //const parsedSpecialties = JSON.parse(specialties || "[]");
@@ -272,6 +329,8 @@ app.post("/api/create-event", async (request, response) => {
       survey: null,
       title,
       virtualEvent: Boolean(virtualEvent),
+      evaluationType,
+      eventCategory,
     };
 
     const docRef = await db.collection("events").add(eventData);
@@ -416,7 +475,12 @@ app.post("/api/register-to-event/:id", async (request, response) => {
 
     // Add the event to the user's myEvents list
     await userRef.update({
-      myEvents: admin.firestore.FieldValue.arrayUnion(eventId),
+      [`myEvents.${eventId}`]: {
+        type: eventData.evaluationType,
+        ...(eventData.evaluationType === "Aprovechamiento" && {
+          grade: null,
+        }),
+      },
     });
 
     return response.status(200).json({ message: "Inscripción exitosa" });
@@ -426,65 +490,105 @@ app.post("/api/register-to-event/:id", async (request, response) => {
   }
 });
 
-//REGISTER TO AN EVENT
+//UNREGISTER TO AN EVENT
 app.post("/api/unregister-from-event/:id", async (request, response) => {
-  const userId = request.body.userId;
   const eventId = request.params.id;
+  const uids = request.body.uids;
 
-  if (!userId || !eventId) {
+  if (!uids || !Array.isArray(uids) || uids.length === 0) {
     return response
       .status(400)
-      .json({ error: "userId y eventId son obligatorios" });
+      .json({ error: "Lista de usuarios vacía o inválida." });
+  }
+
+  const eventRef = db.collection("events").doc(eventId);
+  const eventDoc = await eventRef.get();
+
+  if (!eventDoc.exists) {
+    return response.status(404).json({ error: "Evento no encontrado" });
   }
 
   try {
-    const eventRef = db.collection("events").doc(eventId);
-    const userRef = db.collection("users").doc(userId);
+    const batch = db.batch();
 
-    const eventDoc = await eventRef.get();
-    const userDoc = await userRef.get();
+    for (const uid of uids) {
+      // Remove each UID from the event's registeredUsers array
+      batch.update(eventRef, {
+        registeredUsers: admin.firestore.FieldValue.arrayRemove(uid),
+      });
 
-    if (!eventDoc.exists) {
-      return response.status(404).json({ error: "Evento no encontrado" });
-    }
-    if (!userDoc.exists) {
-      return response.status(404).json({ error: "Usuario no encontrado" });
-    }
-
-    const eventData = eventDoc.data();
-    const eventStartDate = eventData.startDate;
-    const now = new Date();
-    // Check that start date is in the future
-    if (new Date(eventStartDate) <= now) {
-      return response.status(400).json({
-        error:
-          "No puedes desinscribirte después de que el evento haya iniciado.",
+      // Remove each UID from the user's event history
+      const userRef = db.collection("users").doc(uid);
+      batch.update(userRef, {
+        myEvents: admin.firestore.FieldValue.arrayRemove(eventId),
       });
     }
 
-    // Verify the user is already registered.
-    const registeredUsers = eventData.registeredUsers || [];
-    if (!registeredUsers.includes(userId)) {
-      return response
-        .status(400)
-        .json({ error: "No estás inscrito en este evento." });
-    }
+    await batch.commit();
 
-    // Quitar usuario del evento
-    await eventRef.update({
-      registeredUsers: admin.firestore.FieldValue.arrayRemove(userId),
-    });
-
-    // Quitar evento del usuario
-    await userRef.update({
-      myEvents: admin.firestore.FieldValue.arrayRemove(eventId),
-    });
-
-    return response.status(200).json({ message: "Desinscripción exitosa" });
+    return response
+      .status(200)
+      .json({ message: "Usuarios desmatriculados correctamente" });
   } catch (error) {
-    console.error("Error al desinscribirse:", error);
+    console.error("Error al desmatricular usuarios:", error);
     return response.status(500).json({ error: "Error interno del servidor" });
   }
+
+  /////////////////////////////////////////////////
+  // if (!userId || !eventId) {
+  //   return response
+  //     .status(400)
+  //     .json({ error: "userId y eventId son obligatorios" });
+  // }
+
+  // try {
+  //   const eventRef = db.collection("events").doc(eventId);
+  //   const userRef = db.collection("users").doc(userId);
+
+  //   const eventDoc = await eventRef.get();
+  //   const userDoc = await userRef.get();
+
+  //   if (!eventDoc.exists) {
+  //     return response.status(404).json({ error: "Evento no encontrado" });
+  //   }
+  //   if (!userDoc.exists) {
+  //     return response.status(404).json({ error: "Usuario no encontrado" });
+  //   }
+
+  //   const eventData = eventDoc.data();
+  //   const eventStartDate = eventData.startDate;
+  //   const now = new Date();
+  //   // Check that start date is in the future
+  //   if (new Date(eventStartDate) <= now) {
+  //     return response.status(400).json({
+  //       error:
+  //         "No puedes desinscribirte después de que el evento haya iniciado.",
+  //     });
+  //   }
+
+  //   // Verify the user is already registered.
+  //   const registeredUsers = eventData.registeredUsers || [];
+  //   if (!registeredUsers.includes(userId)) {
+  //     return response
+  //       .status(400)
+  //       .json({ error: "No estás inscrito en este evento." });
+  //   }
+
+  //   // Quitar usuario del evento
+  //   await eventRef.update({
+  //     registeredUsers: admin.firestore.FieldValue.arrayRemove(userId),
+  //   });
+
+  //   // Quitar evento del usuario
+  //   await userRef.update({
+  //     myEvents: admin.firestore.FieldValue.arrayRemove(eventId),
+  //   });
+
+  //   return response.status(200).json({ message: "Desinscripción exitosa" });
+  // } catch (error) {
+  //   console.error("Error al desinscribirse:", error);
+  //   return response.status(500).json({ error: "Error interno del servidor" });
+  // }
 });
 
 //REQUEST REGISTRATION (FOR RESTRICTED EVENTS)
@@ -618,8 +722,17 @@ app.post(
         });
 
         // Add event to the user's event history
+        // await userRef.update({
+        //   myEvents: admin.firestore.FieldValue.arrayUnion(eventId),
+        // });
+
         await userRef.update({
-          myEvents: admin.firestore.FieldValue.arrayUnion(eventId),
+          [`myEvents.${eventId}`]: {
+            type: eventData.evaluationType,
+            ...(eventData.evaluationType === "Aprovechamiento" && {
+              grade: null,
+            }),
+          },
         });
 
         return response
@@ -641,6 +754,76 @@ app.post(
     }
   }
 );
+
+//UPDATE A SINGLE USER GRADE (FOR EVENTS WITH evaluationType='Aprovechamiento')
+app.post("/api/update-user-grade", async (request, response) => {
+  const { uid, eventID, grade } = request.body;
+
+  if (!uid || !eventID || (grade !== null && typeof grade !== "number")) {
+    return response.status(400).json({ error: "Datos inválidos" });
+  }
+
+  try {
+    const userRef = db.collection("users").doc(uid);
+    const userDoc = await userRef.get();
+
+    // Verify that an user with the provided ID exists
+    if (!userDoc.exists) {
+      return response.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    // Verify that an event with the provided ID exists
+    const userData = userDoc.data();
+    const myEvents = userData.myEvents || {};
+
+    if (!myEvents[eventID]) {
+      return response.status(400).json({
+        error: `El evento '${eventID}' no está registrado para este usuario`,
+      });
+    }
+
+    // Update the grade
+    await userRef.update({
+      [`myEvents.${eventID}.grade`]: grade,
+    });
+
+    return response.status(200).json({ success: true });
+  } catch (err) {
+    console.error("Error al actualizar la nota:", err);
+    response.status(500).send({ error: "Error al actualizar nota" });
+  }
+});
+
+//UPDATE ALL GRADES OF AN EVENT (FOR EVENTS WITH evaluationType='Aprovechamiento')
+app.post("/api/update-multiple-grades", async (request, response) => {
+  const { eventID, updates } = request.body;
+
+  if (!eventID || !Array.isArray(updates)) {
+    return response.status(400).json({ error: "Datos inválidos" });
+  }
+
+  try {
+    const batch = db.batch();
+
+    for (const { uid, grade } of updates) {
+      if (!uid) continue;
+
+      const userRef = db.collection("users").doc(uid);
+      const fieldPath = `myEvents.${eventID}.grade`;
+      const updateData = {};
+
+      updateData[fieldPath] = grade;
+      batch.update(userRef, updateData);
+    }
+
+    await batch.commit();
+
+    return response.status(200).json({ success: true });
+  } catch (error) {
+    console.error("Error al actualizar múltiples notas:", error);
+    return res.status(500).json({ error: "Error al guardar las notas" });
+  }
+});
 
 //ADD USER TO WAITING LIST
 app.post(
@@ -821,7 +1004,29 @@ app.get("/api/users", async (request, response) => {
   }
 });
 
-//GET USER BY ID
+//GET USERS FROM GIVEN LIST OF UIDs
+app.get("/api/users-from-list", async (request, response) => {
+  const raw = request.query.uids;
+  const uids = Array.isArray(raw) ? raw : [raw];
+
+  if (!uids || !Array.isArray(uids)) {
+    return response.status(400).json({ message: "Parámetro uids inválido" });
+  }
+
+  try {
+    const promises = uids.map((uid) => db.collection("users").doc(uid).get());
+    const snapshots = await Promise.all(promises);
+
+    const users = snapshots
+      .filter((snap) => snap.exists)
+      .map((snap) => ({ uid: snap.id, ...snap.data() }));
+
+    response.status(200).json(users);
+  } catch (error) {
+    console.error("Error al obtener usuarios:", error);
+    response.status(500).json({ message: "Error interno" });
+  }
+});
 
 //CHANGE USER ROL
 app.put("/api/update-user-role/:id", async (request, response) => {
@@ -929,6 +1134,71 @@ app.delete("/api/delete-user/:id", async (request, response) => {
   }
 });
 
+//UPDATE USER INFORMATION
+app.post(
+  "/api/update-profile/:id",
+  upload.single("photo"),
+  async (request, response) => {
+    const uid = request.params.id;
+
+    if (!uid) {
+      return response.status(400).json({ error: "UID requerido" });
+    }
+
+    const {
+      name,
+      lastName1,
+      lastName2,
+      phone,
+      birthDate,
+      institution,
+      teachingLevel,
+      specializations,
+    } = request.body;
+
+    try {
+      let photoURL = null;
+      if (request.file) {
+        photoURL = await compressProfilePicture(request.file, uid);
+      }
+
+      // const parsedSpecializations = JSON.parse(specializations || "[]");
+      const parsedSpecializations = specializations
+        ? JSON.parse(specializations)
+        : [];
+
+      const updateData = {
+        name,
+        lastName1,
+        lastName2,
+        phone,
+        birthDate,
+        institution,
+        teachingLevel,
+        specializations: parsedSpecializations,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        ...(photoURL !== null && { photoURL }), // Update the profile picture only if it's been uploaded.
+      };
+
+      // Remove undefined fields
+      Object.keys(updateData).forEach((key) => {
+        if (updateData[key] === undefined) {
+          delete updateData[key];
+        }
+      });
+
+      await db.collection("users").doc(uid).set(updateData, { merge: true });
+      response.status(200).json({
+        message: "Perfil actualizado correctamente ",
+        uid: uid,
+      });
+    } catch (error) {
+      console.error("Error actualizando perfil:", error);
+      return response.status(400).json({ error: error.message });
+    }
+  }
+);
+
 //CREATE SURVEY
 app.post("/api/create-survey", async (request, response) => {
   try {
@@ -941,7 +1211,6 @@ app.post("/api/create-survey", async (request, response) => {
     const docRef = await db.collection("surveys").add({
       ...survey,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      answers: [],
     });
 
     response.status(201).json({ id: docRef.id });
@@ -951,7 +1220,46 @@ app.post("/api/create-survey", async (request, response) => {
   }
 });
 
+//SAVE SURVEY ANSWERS
+app.post("/api/surveys/:id/responses", async (request, response) => {
+  const { id } = request.params;
+  const { uid, answers } = request.body;
+
+  try {
+    const docRef = await db
+      .collection("surveys")
+      .doc(id)
+      .collection("responses")
+      .doc(uid)
+      .set({
+        answers,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+    response.status(201).json({ responseId: docRef.id });
+  } catch (error) {
+    console.error("Error al guardar respuesta:", error);
+    response.status(500).json({ message: "Error al guardar la respuesta" });
+  }
+});
+
 //GET SURVEYS
+app.get("/api/surveys", async (request, response) => {
+  try {
+    const surveysSnapshot = await db.collection("surveys").get();
+    const surveys = surveysSnapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    response.status(200).json(surveys);
+  } catch (error) {
+    console.error("Error al obtener las encuestas:", error);
+    response
+      .status(500)
+      .json({ message: "Error interno al obtener las encuestas" });
+  }
+});
+
 app.get("/api/surveys/:id", async (request, response) => {
   const { id } = request.params;
 
@@ -969,11 +1277,115 @@ app.get("/api/surveys/:id", async (request, response) => {
   }
 });
 
+//GET SURVEY'S RESPONSES
+app.get("/api/surveys/:id/responses", async (request, response) => {
+  const { id } = request.params;
+
+  try {
+    const snapshot = await db
+      .collection("surveys")
+      .doc(id)
+      .collection("responses")
+      .orderBy("createdAt", "desc")
+      .get();
+
+    const responses = snapshot.docs.map((doc) => ({
+      uid: doc.id,
+      ...doc.data(),
+    }));
+
+    response.status(200).json(responses);
+  } catch (error) {
+    console.error("Error al obtener respuestas:", error);
+    response.status(500).json({ message: "Error al obtener respuestas" });
+  }
+});
+
 //GET SURVEYS BY ID
 
-//DELETE SURVEY
+//DELETE SURVEY AND ITS REFERENCES IN EVENTS
+app.delete("/api/delete-survey/:id", async (request, response) => {
+  const surveyId = request.params.id;
+
+  if (!surveyId) {
+    return response
+      .status(400)
+      .json({ error: "El ID de la encuesta es obligatorio" });
+  }
+
+  try {
+    const docRef = db.collection("surveys").doc(surveyId);
+
+    // Delete all answers on the "responses" subcolection
+    const responsesRef = docRef.collection("responses");
+    await deleteCollectionInBatchesIterative(responsesRef);
+
+    await docRef.delete();
+
+    // Look for the events that have the survey
+    const eventsSnapshot = await db
+      .collection("events")
+      .where("survey", "==", surveyId)
+      .get();
+
+    // Update the value to NULL
+    const batch = db.batch();
+    eventsSnapshot.forEach((doc) => {
+      batch.update(doc.ref, { survey: null });
+    });
+    await batch.commit();
+
+    return response
+      .status(200)
+      .json({ message: "Encuesta eliminada correctamente" });
+  } catch (error) {
+    console.error("Error al eliminar el la encuesta:", error);
+    return response.status(500).json({ error: "Error interno del servidor" });
+  }
+});
 
 //STATISTICS
+app.get("/api/stats", async (request, response) => {
+  try {
+    const [eventsSnap, usersSnap] = await Promise.all([
+      db.collection("events").get(),
+      db.collection("users").get(),
+    ]);
+
+    const totalCourses = eventsSnap.size;
+    const totalUsers = usersSnap.size;
+    const participantsByCourse = {};
+    let primary = 0,
+      secondary = 0;
+
+    usersSnap.forEach((doc) => {
+      const data = doc.data();
+      const teachingLevel = (data.teachingLevel || "").toLowerCase();
+      if (teachingLevel.includes("primaria")) primary++;
+      else if (teachingLevel.includes("secundaria")) secondary++;
+    });
+
+    eventsSnap.forEach((doc) => {
+      const data = doc.data();
+      const title = data.title || `Evento ${doc.id}`;
+      const count = Array.isArray(data.registeredUsers)
+        ? data.registeredUsers.length
+        : 0;
+      participantsByCourse[title] = count;
+    });
+
+    response.json({
+      totalCourses,
+      totalUsers,
+      primary,
+      secondary,
+      participantsByCourse,
+    });
+  } catch (error) {
+    console.error("Error fetching statitics:", error);
+    response.status(500).json({ error: "Error al obtener estadísticas" });
+  }
+});
 
 //#################################################################################################
 
