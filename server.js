@@ -1303,7 +1303,65 @@ app.get("/api/surveys/:id/responses", async (request, response) => {
   }
 });
 
-//GET SURVEYS BY ID
+//GET SURVEY'S RESPONSES TO GENERATE A .CSV FILE
+app.get("/api/surveys/:id/download-responses", async (request, response) => {
+  const surveyId = request.params.id;
+
+  if (surveyId?.trim() === "") {
+    return response
+      .status(400)
+      .json({ error: "Debe proporcionarse un ID de encuesta válido." });
+  }
+
+  try {
+    const surveyDoc = await db.collection("surveys").doc(surveyId).get();
+    if (!surveyDoc.exists) {
+      return response
+        .status(404)
+        .json({ error: "No existe la encuesta consultada." });
+    }
+
+    const responsesSnap = await surveyDoc.ref.collection("responses").get();
+    if (responsesSnap.empty) {
+      return response
+        .status(404)
+        .json({ error: "No hay respuestas para esta encuesta." });
+    }
+
+    const result = [];
+
+    for (const doc of responsesSnap.docs) {
+      const uid = doc.id;
+      const data = doc.data();
+      const answers = data.answers || {};
+      const createdAt = data.createdAt?._seconds
+        ? DateTime.fromSeconds(data.createdAt._seconds).toISODate()
+        : "Fecha desconocida";
+
+      let userName = "Usuario eliminado";
+      const userSnap = await db.collection("users").doc(uid).get();
+      if (userSnap.exists) {
+        const u = userSnap.data();
+        userName = `${u.name || ""} ${u.lastName1 || ""} ${
+          u.lastName2 || ""
+        }`.trim();
+      }
+
+      result.push({
+        encuestado: userName,
+        ...answers,
+        createdAt,
+      });
+    }
+
+    response.status(200).json(result);
+  } catch (error) {
+    console.error("Error obteniendo respuestas:", error);
+    response
+      .status(500)
+      .json({ error: "No se pudo obtener la información de la encuesta" });
+  }
+});
 
 //DELETE SURVEY AND ITS REFERENCES IN EVENTS
 app.delete("/api/delete-survey/:id", async (request, response) => {
