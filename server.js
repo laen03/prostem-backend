@@ -4,9 +4,11 @@ const cors = require("cors");
 const app = express();
 const multer = require("multer");
 const { DateTime } = require("luxon");
+const nodemailer = require("nodemailer");
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+require("dotenv").config(); // carga las variables de .env
 
 //Initialize firebase admin
 const PORT = process.env.PORT || 3000;
@@ -1345,45 +1347,272 @@ app.delete("/api/delete-survey/:id", async (request, response) => {
 });
 
 //STATISTICS
+//GENERAL STATS
 app.get("/api/stats", async (request, response) => {
   try {
-    const [eventsSnap, usersSnap] = await Promise.all([
-      db.collection("events").get(),
+    const [usersSnap, eventsSnap, surveysSnap] = await Promise.all([
       db.collection("users").get(),
+      db.collection("events").get(),
+      db.collection("surveys").get(),
     ]);
 
-    const totalCourses = eventsSnap.size;
-    const totalUsers = usersSnap.size;
-    const participantsByCourse = {};
-    let primary = 0,
-      secondary = 0;
+    const now = DateTime.now();
+    const monthsBack = parseInt(request.query.months) || 6;
+    const monthlyRegistrations = {};
+    const educationSplit = { primaria: 0, secundaria: 0 };
+
+    // Initialize the structure with the months empty
+    for (let i = monthsBack - 1; i >= 0; i--) {
+      const date = now.minus({ months: i });
+      const key = date.toFormat("MMM").toLowerCase(); // "feb", "mar"
+      monthlyRegistrations[key] = 0;
+    }
 
     usersSnap.forEach((doc) => {
       const data = doc.data();
-      const teachingLevel = (data.teachingLevel || "").toLowerCase();
-      if (teachingLevel.includes("primaria")) primary++;
-      else if (teachingLevel.includes("secundaria")) secondary++;
-    });
+      const createdAt = data.createdAt?._seconds
+        ? DateTime.fromSeconds(data.createdAt._seconds)
+        : null;
 
-    eventsSnap.forEach((doc) => {
-      const data = doc.data();
-      const title = data.title || `Evento ${doc.id}`;
-      const count = Array.isArray(data.registeredUsers)
-        ? data.registeredUsers.length
-        : 0;
-      participantsByCourse[title] = count;
+      if (createdAt) {
+        const diff = now.diff(createdAt, "months").months;
+        if (diff <= monthsBack) {
+          const key = createdAt.toFormat("MMM").toLowerCase();
+          if (monthlyRegistrations[key] !== undefined) {
+            monthlyRegistrations[key]++;
+          }
+        }
+      }
+
+      const teachingLevel = (data.teachingLevel || "").toLowerCase();
+      if (teachingLevel.includes("primaria")) educationSplit.primaria++;
+      else if (teachingLevel.includes("secundaria"))
+        educationSplit.secundaria++;
     });
 
     response.json({
-      totalCourses,
-      totalUsers,
-      primary,
-      secondary,
-      participantsByCourse,
+      totalUsers: usersSnap.size,
+      totalCourses: eventsSnap.size,
+      totalSurveys: surveysSnap.size,
+      monthlyRegistrations,
+      educationSplit,
     });
   } catch (error) {
     console.error("Error fetching statitics:", error);
     response.status(500).json({ error: "Error al obtener estadísticas" });
+  }
+});
+
+//USERS STATS
+app.get("/api/stats/users", async (request, response) => {
+  try {
+    const usersSnap = await db.collection("users").get();
+
+    const roles = {};
+    const institutions = {};
+    const ages = [];
+    const specCount = {};
+    const participation = { 0: 0, "1-2": 0, "3-5": 0, "6+": 0 };
+
+    const today = DateTime.now();
+
+    usersSnap.forEach((doc) => {
+      const user = doc.data();
+
+      // Role count
+      roles[user.role] = (roles[user.role] || 0) + 1;
+
+      // Institution (case sensitive for now)
+      const inst = user.institution?.trim();
+      if (inst) institutions[inst] = (institutions[inst] || 0) + 1;
+
+      // Age
+      const birthDate = user.birthDate;
+      if (birthDate) {
+        const parsed = DateTime.fromISO(birthDate);
+        if (parsed.isValid) {
+          const age = today.diff(parsed, "years").years;
+          ages.push(Math.floor(age));
+        }
+      }
+
+      // Specializations
+      if (Array.isArray(user.specializations)) {
+        user.specializations.forEach((spec) => {
+          if (spec) {
+            specCount[spec] = (specCount[spec] || 0) + 1;
+          }
+        });
+      }
+
+      // Event participation
+      const myEvents = user.myEvents || {};
+      const eventCount = Object.keys(myEvents).length;
+      if (eventCount === 0) participation["0"]++;
+      else if (eventCount <= 2) participation["1-2"]++;
+      else if (eventCount <= 5) participation["3-5"]++;
+      else participation["6+"]++;
+    });
+
+    const averageAge = ages.reduce((a, b) => a + b, 0) / (ages.length || 1);
+    const ageStats = {
+      average: Math.round(averageAge),
+      min: Math.min(...ages),
+      max: Math.max(...ages),
+    };
+
+    // Top 3 specializations
+    const topSpecializations = Object.entries(specCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, count]) => ({ name, count }));
+
+    response.json({
+      roles,
+      institutions,
+      ageStats,
+      topSpecializations,
+      eventsParticipation: participation,
+    });
+  } catch (error) {
+    console.error("Error al obtener estadísticas de usuarios:", error);
+    response
+      .status(500)
+      .json({ error: "Error al obtener estadísticas de usuarios" });
+  }
+});
+
+//EVENTS STATS
+app.get("/api/stats/activities", async (request, response) => {
+  try {
+    const eventsSnap = await db.collection("events").get();
+
+    const enrollmentType = { open: 0, restricted: 0 };
+    const evaluationType = { leveraging: 0, participation: 0 };
+    const modality = { virtual: 0, presencial: 0 };
+    const categories = {};
+    const withSurvey = { count: 0 };
+    const withoutSurvey = { count: 0 };
+    const capacity = { total: 0, used: 0 };
+    const topEvents = [];
+    const specialtyCount = {};
+    const monthlyDistribution = {};
+
+    const now = DateTime.now();
+
+    eventsSnap.forEach((doc) => {
+      const e = doc.data();
+
+      // Enrollment type
+      if (e.enrollmentType === "Abierta") enrollmentType.open++;
+      else if (e.enrollmentType === "Restringida") enrollmentType.restricted++;
+
+      // Enrollment type
+      if (e.evaluationType === "Aprovechamiento") evaluationType.leveraging++;
+      else if (e.evaluationType === "Participación")
+        evaluationType.participation++;
+
+      // Modality
+      if (e.virtualEvent === true) modality.virtual++;
+      else modality.presencial++;
+
+      // Event category
+      if (e.eventCategory) {
+        categories[e.eventCategory] = (categories[e.eventCategory] || 0) + 1;
+      }
+
+      // Surveys
+      if (e.survey) withSurvey.count++;
+      else withoutSurvey.count++;
+
+      // Capacity
+      capacity.total += e.capacity || 0;
+      capacity.used += Array.isArray(e.registeredUsers)
+        ? e.registeredUsers.length
+        : 0;
+
+      // Events with the highest participation
+      const registeredCount = Array.isArray(e.registeredUsers)
+        ? e.registeredUsers.length
+        : 0;
+      topEvents.push({
+        title: e.title || "Sin título",
+        count: registeredCount,
+      });
+
+      // Specialties
+      if (Array.isArray(e.specialties)) {
+        e.specialties.forEach((s) => {
+          if (s) {
+            specialtyCount[s] = (specialtyCount[s] || 0) + 1;
+          }
+        });
+      }
+
+      // Month distribution by (startDate)
+      if (e.startDate) {
+        const date = DateTime.fromISO(e.startDate);
+        if (date.isValid) {
+          const month = date.toFormat("MMM").toLowerCase(); // ej: feb, mar
+          monthlyDistribution[month] = (monthlyDistribution[month] || 0) + 1;
+        }
+      }
+    });
+
+    // Order the top 5 events
+    const top5 = topEvents.sort((a, b) => b.count - a.count).slice(0, 5);
+
+    response.json({
+      enrollmentType,
+      evaluationType,
+      modality,
+      categories,
+      withSurvey: withSurvey.count,
+      withoutSurvey: withoutSurvey.count,
+      capacity,
+      topEvents: top5,
+      specialties: specialtyCount,
+      monthlyDistribution,
+    });
+  } catch (error) {
+    console.error("Error al obtener estadísticas de los eventos:", error);
+    response
+      .status(500)
+      .json({ error: "Error al obtener estadísticas de los eventos." });
+  }
+});
+
+// CONTACT US
+app.post("/api/contact-us", async (request, response) => {
+  const { recipient, subject, phone, comment } = request.body;
+
+  if (!recipient || !subject || !comment) {
+    return response.status(400).json({ error: "Faltan campos obligatorios." });
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      service: "gmail", // o el servicio que uses
+      auth: {
+        user: process.env.CONTACT_EMAIL,
+        pass: process.env.CONTACT_PASSWORD,
+      },
+    });
+
+    const mailOptions = {
+      from: `"Usuario de la app ProSTEM" <${process.env.CONTACT_EMAIL}>`,
+      to: process.env.CONTACT_EMAIL,
+      subject: `Mensaje desde Contáctanos: ${subject}`,
+      text: `Remitente '${recipient}'\n\n Comentario:\n${comment}\n\n Teléfono de contacto del usuario: ${
+        phone || "No proporcionado"
+      }`,
+    };
+
+    await transporter.sendMail(mailOptions);
+    response.json({ success: true });
+  } catch (error) {
+    console.error("Error al enviar correo:", error);
+    response.status(500).json({ error: "Error al enviar el correo." });
   }
 });
 
