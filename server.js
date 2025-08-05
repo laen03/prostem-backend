@@ -1,5 +1,5 @@
 const express = require("express");
-const admin = require("./firebase-admin");
+const admin = require("firebase-admin");
 const cors = require("cors");
 const app = express();
 const multer = require("multer");
@@ -9,6 +9,20 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 require("dotenv").config(); // carga las variables de .env
+
+
+
+require("dotenv").config();
+
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  }),
+  storageBucket: "prostem-db-68733.appspot.com",
+});
+
 
 //Initialize firebase admin
 const PORT = process.env.PORT || 3000;
