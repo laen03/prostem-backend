@@ -305,6 +305,7 @@ app.post("/api/create-event", async (request, response) => {
       endTime,
       enrollmentType,
       place,
+      teachingLevels,
       specialties,
       startDate,
       startTime,
@@ -324,6 +325,7 @@ app.post("/api/create-event", async (request, response) => {
       endTime,
       enrollmentType,
       place,
+      teachingLevels,
       specialties,
       startDate,
       registeredUsers: [],
@@ -1164,7 +1166,6 @@ app.post(
         photoURL = await compressProfilePicture(request.file, uid);
       }
 
-      // const parsedSpecializations = JSON.parse(specializations || "[]");
       const parsedSpecializations = specializations
         ? JSON.parse(specializations)
         : [];
