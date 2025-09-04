@@ -1691,6 +1691,88 @@ app.post("/api/contact-us", async (request, response) => {
 
 //#################################################################################################
 
+// Endpoints JVR:
+
+//variable for conferences collection in database
+const conferencesDB = db.collection("conferences")
+
+//variable for presentations collection in database
+const presentationsDB = db.collection("presentations")
+
+//Endpoint to create a new conference
+app.post("/api/conferences", async (req, res) =>{
+
+  try{
+    const data = req.body
+    const newConference = await conferencesDB.add(data)
+    res.status(201).json({"id": newConference.id, ...data})
+    
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to modify a conference
+app.put("/api/conferences/:id", async (req, res) => {
+  try{
+    const data = req.body
+    await conferencesDB.doc(req.params.id).update(data)
+    res.status(201).json({"result": "conference updated"}) 
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to get a specific conference
+app.get("/api/conferences", async (req, res) =>{
+  try{
+    const data = await conferencesDB.get()
+    const conferences = data.docs.map(doc => ({id: doc.id, ...doc.data()})) 
+    res.status(201).json(conferences)
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to get all conferences 
+app.get("/api/conferences/:id", async (req, res) =>{
+  try{
+    const id = req.params.id
+    const doc = await conferencesDB.doc(id).get()
+    res.status(201).json({"id": doc.id, ...doc.data})
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to create a new presentation
+app.post("/api/conferences/presentations", async (req, res)=>{
+  
+  try{
+    const data = req.body
+    await presentationsDB.add(data)
+    res.status(201).json({"result": "conference updated successfully"})
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to modify a presentation
+app.put("/api/conferences/presentations/:id", async (req, res) =>{
+  try{
+    const data = req.body
+    await presentationsDB.doc(req.params.id).update(data)
+    res.status(201).json({"result": "Presentation updated successfully"})
+  }catch{
+    res.status(500).json({"error": error.message})
+  }
+})
+
+
+
+
+//#################################################################################################
+
 app.listen(PORT, (error) => {
   if (error) console.log("There was an error:", error);
   console.log(`App available on http://localhost:${PORT} `);
