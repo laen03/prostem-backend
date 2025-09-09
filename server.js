@@ -1768,6 +1768,44 @@ app.put("/api/conferences/presentations/:id", async (req, res) =>{
   }
 })
 
+//########################################################################
+//Reminder email section
+
+//Transporter to prepare the emails
+
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false,
+  auth: {
+    user: "prostem.itcr@gmail.com",
+    pass: "zevnywbizdymsuee"
+  }
+})
+
+//endpoint to send reminder email
+app.post("/send-reminder-email", async (req, res) =>{
+  const {to, subject, text} = req.body
+  try{
+    const info = await transporter.sendMail({
+      from: "prostem.itcr@gmail.com",
+      to,
+      subject,
+      text
+    })
+    console.log("Email sent: ", info.response),
+    res.status(200).json({message: "Email sent", info})
+  }catch(error){
+    console.log("error: ", error)
+    res.status(500).json({error: error.message})
+  }
+})
+
+
+
+
+//##################################################################33
+
 
 
 
