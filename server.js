@@ -1838,37 +1838,37 @@ app.post("/api/send-reminder-email", async (req, res) =>{
   }
 })
 
-cron.schedule("4 11 * * *", async () => {
-  const usersSnapshot = await db.collection("users").get();
+cron.schedule("16 14 * * *", async () => {
+  const eventsSnapshot = await db.collection("events").get();
   const now = new Date();
 
-  for (const userDoc of usersSnapshot.docs){
-    const user = userDoc.data();
-    const myEvents = user.myEvents || {};
+  for(const eventDoc of eventsSnapshot.docs){
+    const event = eventDoc.data();
 
-    for (const eventId in myEvents){
-      const eventDoc = await db.collection("events").doc(eventId).get();
-      if (!eventDoc.exists) continue;
+    const eventDateTime = new Date(`${event.startDate}T${event.startTime}:00`);
 
-      const event = eventDoc.data()
+    const oneDayBefore = new Date(eventDateTime);
+    oneDayBefore.setDate(eventDateTime.getDate() - 1);
 
-      const eventDataTime = new Date(`${event.startDate}T${event.startTime}:00`);
+    const formatDate = (d) => d.toISOString().split("T")[0];
 
-      const oneDayBefore = new Date(eventDataTime);
-      oneDayBefore.setDate(eventDataTime.getDate() - 1)
+    if(formatDate(now) === formatDate(oneDayBefore)){
+      const registeredUsers = event.registeredUsers || [];
 
-      const formatDate = (d) => d.toISOString().split("T")[0];
+      for (const userId of registeredUsers){
+        const userDoc = await db.collection("users").doc(userId).get();
+        if(!userDoc.exists) continue;
 
-      if(formatDate(now) === formatDate(oneDayBefore)){
+        const user = userDoc.data();
+
         await transporter.sendMail({
           from: "prostem.itcr@gmail.com",
           to: user.email,
-          subject: `ProStem, Recordatorio a evento próximo: ${event.title}`,
-          text: `Hola estimado/a ${user.name || ""}! ProSTEM te recuerda que el evento "${event.title}", el cuál se realizará el día de mañana a las "${event.startTime}" ` 
-        })
-        console.log(`Recordatorio enviado a ${user.email}`)
+          subject: `Recordatorio evento próximo: ${event.title}`,
+          text: `Hola, estimado/a ${user.name || ""}, ProSTEM le recuerda el evento ${event.title}, para el día de mañana a las ${event.startTime}` 
+        });
+        console.log(`Remider sent to ${user.email} for the event ${event.title}`)
       }
-      
     }
   }
 
