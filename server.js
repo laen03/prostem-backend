@@ -5,6 +5,7 @@ const app = express();
 const multer = require("multer");
 const { DateTime } = require("luxon");
 const nodemailer = require("nodemailer");
+const cron = require("node-cron")
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -1801,10 +1802,44 @@ app.post("/send-reminder-email", async (req, res) =>{
   }
 })
 
+cron.schedule("0 9 * * *", async () => {
+  const usersSnapshot = await db.collection("users").get();
+  const now = new Date();
+
+  for (const userDoc of usersSnapshot.docs){
+    const user = userDoc.data();
+    const myEvents = user.myEvents || {};
+
+    for (const eventId in myEvents){
+      const eventDoc = await db.collection("events").doc(eventId).get();
+      if (!eventDoc.exists) continue;
+
+      const event = eventDoc.data()
+
+      const eventDataTime = new Date(`${event.startDate}T${event.startTime}:00`);
+
+      const oneDayBefore = new Date(eventDataTime);
+      oneDayBefore.setDate(eventDataTime.getDate() - 1)
+
+      const formatDate = (d) => d.toISOString().split("T")[0];
+
+      if(formatDate(now) === formatDate(oneDayBefore)){
+        await transporter.sendMail({
+          from: "prostem.itcr@gmail.com",
+          to: user.email,
+          subject: `ProStem, Recordatorio a evento próximo: ${event.title}`,
+          text: `Hola estimado/a ${user.name || ""}! ProSTEM te recuerda que el evento "${event.title}", el cuál se realizará el día de mañana a las "${event.startTime}" ` 
+        })
+        console.log(`Recordatorio enviado a ${user.email}`)
+      }
+      
+    }
+  }
+
+})
 
 
-
-//##################################################################33
+//################################################################################################
 
 
 
