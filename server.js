@@ -1769,6 +1769,42 @@ app.put("/api/conferences/presentations/:id", async (req, res) =>{
   }
 })
 
+//Endpoint to create new reviewers
+app.post("/api/reviewers", async (req, res) =>{
+  try{
+    const data = req.body
+    const newReviewer = await db.collection("reviewers").add(data);
+    res.status(201).json({"New reviewer":newReviewer.id, ...data})
+  }catch(error){
+    res.status(500).json({"Error": error.message})
+  }
+
+})
+
+//Endpoint to update a specific reviewer
+app.put("/api/reviewers/:id", async (req, res) => {
+  try{
+    const data = req.body
+    const reviewer = await db.collection("reviewers").doc(req.params.id).update(data);
+    
+    res.status(201).json({"Reviewer upadted": reviewer.id, ...data})
+  }catch(error){
+    res.status(500).json({"Error ": error.message})
+  }
+
+})
+
+//endpoint to delete a reviewer
+app.delete("/api/reviewers/:id", async (req, res) =>{
+  try{
+    await db.collection("reviewers").doc(req.params.id).delete();
+    res.status(201).json({"Result": "Reviewer deleted successfully"})
+  }catch(error){
+    res.status(501).json({"Error": error.message})
+  }
+  
+})
+
 //########################################################################
 //Reminder email section
 
@@ -1785,7 +1821,7 @@ const transporter = nodemailer.createTransport({
 })
 
 //endpoint to send reminder email
-app.post("/send-reminder-email", async (req, res) =>{
+app.post("/api/send-reminder-email", async (req, res) =>{
   const {to, subject, text} = req.body
   try{
     const info = await transporter.sendMail({
@@ -1802,7 +1838,7 @@ app.post("/send-reminder-email", async (req, res) =>{
   }
 })
 
-cron.schedule("0 9 * * *", async () => {
+cron.schedule("4 11 * * *", async () => {
   const usersSnapshot = await db.collection("users").get();
   const now = new Date();
 
