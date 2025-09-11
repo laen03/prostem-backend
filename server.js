@@ -1724,7 +1724,8 @@ app.put("/api/conferences/:id", async (req, res) => {
   }
 })
 
-//Endpoint to get a specific conference
+
+//Endpoint to get all conferences 
 app.get("/api/conferences", async (req, res) =>{
   try{
     const data = await conferencesDB.get()
@@ -1735,7 +1736,19 @@ app.get("/api/conferences", async (req, res) =>{
   }
 })
 
-//Endpoint to get all conferences 
+//Endpoint to get all presentations
+app.get("/api/conferences/presentations", async (req, res) =>{
+  try{
+    const data = await db.collection("presentations").get()
+    const presentations = data.docs.map(doc => ({id: doc.id, ...doc.data()})) 
+    res.status(201).json(presentations)
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+
+//Endpoint to get a specific conference
 app.get("/api/conferences/:id", async (req, res) =>{
   try{
     const id = req.params.id
@@ -1745,6 +1758,7 @@ app.get("/api/conferences/:id", async (req, res) =>{
     res.status(500).json({"error": error.message})
   }
 })
+
 
 //Endpoint to create a new presentation
 app.post("/api/conferences/presentations", async (req, res)=>{
@@ -1766,6 +1780,16 @@ app.put("/api/conferences/presentations/:id", async (req, res) =>{
     res.status(201).json({"result": "Presentation updated successfully"})
   }catch{
     res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to delete a presentation
+app.delete("/api/conferences/presentations/:id", async (req, res) => {
+  try{
+    await db.collection("presentations").doc(req.params.id).delete()
+    res.status(201).json({"Result": "Presentation deleted successfully"})
+  }catch(error){
+    res.status(500).json({"Error": error.message})
   }
 })
 
