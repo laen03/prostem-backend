@@ -1736,12 +1736,41 @@ app.get("/api/conferences", async (req, res) =>{
   }
 })
 
-//Endpoint to get all presentations
+//Endpoint to get all presentations in general
 app.get("/api/conferences/presentations", async (req, res) =>{
   try{
     const data = await db.collection("presentations").get()
     const presentations = data.docs.map(doc => ({id: doc.id, ...doc.data()})) 
     res.status(201).json(presentations)
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to get all presentations from a certain conference
+app.get("/api/conferences/presentations/:id", async (req, res) => {
+  try{
+    const docId = req.params.id
+    const conference = await db.collection("conferences").doc(docId).get()
+    const presentationsIds = conference.get("presentations" || [])
+
+    if(!conference.exists){
+      return res.status(404).json({error: "conference not found"})
+    }
+
+    const presentationsData = []
+
+    for(const presId of presentationsIds){
+      const presSnap = await db.collection("presentations").doc(presId).get();
+      if (presSnap.exists){
+        presentationsData.push({
+          id: presSnap.id,
+          ...presSnap.data()
+        })
+      }
+    }
+
+    res.status(201).json(presentationsData)
   }catch(error){
     res.status(500).json({"error": error.message})
   }
