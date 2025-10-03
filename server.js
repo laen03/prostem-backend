@@ -1713,6 +1713,52 @@ app.post("/api/conferences", async (req, res) =>{
   }
 })
 
+//Endpoint to create a new conference for a specific user
+app.post("/api/conferences/:id", async (req, res) =>{
+
+  try{
+    const managerId = req.params.id
+    const data = req.body
+
+    const newConferenceData = {
+      ...data,
+      managerId: managerId
+    }
+
+    const newConference = await conferencesDB.add(newConferenceData)
+
+    const userRef = db.collection("users").doc(managerId)
+
+    await userRef.update({
+      conferencesManager: admin.firestore.FieldValue.arrayUnion(newConference.id)
+    })
+
+    res.status(201).json({"id": newConference.id, ...data})
+    
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
+//Endpoint to get all conferences for a specific user
+app.get("/api/conferences/:id", async (req, res) =>{
+  try{
+    const userId = req.params.id
+    const data = await conferencesDB.get()
+    const conferences = data.docs.map(doc => ({id: doc.id, ...doc.data()})) 
+    const userConferences = []
+
+    for(const conference of conferences){
+      if (conference.managerId == userId){
+        userConferences.push(conference)
+      }
+    }
+    res.status(201).json(userConferences)
+  }catch(error){
+    res.status(500).json({"error": error.message})
+  }
+})
+
 //Endpoint to modify a conference
 app.put("/api/conferences/:id", async (req, res) => {
   try{
@@ -1736,6 +1782,8 @@ app.get("/api/conferences", async (req, res) =>{
   }
 })
 
+
+
 //Endpoint to get all presentations in general
 app.get("/api/conferences/presentations", async (req, res) =>{
   try{
@@ -1746,6 +1794,8 @@ app.get("/api/conferences/presentations", async (req, res) =>{
     res.status(500).json({"error": error.message})
   }
 })
+
+
 
 //Endpoint to get all presentations from a certain conference
 app.get("/api/conferences/presentations/:id", async (req, res) => {
@@ -1857,6 +1907,51 @@ app.delete("/api/reviewers/:id", async (req, res) =>{
   }
   
 })
+
+//Endpoint to get all reviewers in general
+app.get("/api/reviewers", async (req, res) => {
+  try {
+    const reviewersSnapshot = await db.collection("reviewers").get();
+    const reviewers = reviewersSnapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    res.status(200).json(reviewers);
+  } catch (error) {
+    console.error("Error fetching reviewers:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+//Endpoint to assign a presentation to a reviewer
+app.post("/api/reviewers/assignReviewer", async (req, res) => {
+  const { reviewerId, presentationId } = req.body;
+
+  if (!reviewerId || !presentationId) {
+    return res.status(400).json({ error: "Reviewer ID and Presentation ID are required" });
+  }
+
+  try {
+    const reviewerRef = db.collection("reviewers").doc(reviewerId);
+    const presentationRef = db.collection("presentations").doc(presentationId);
+
+    // Update the reviewer's presentationsAssigned field
+    await reviewerRef.update({
+      presentationsAssigned: admin.firestore.FieldValue.arrayUnion(presentationId),
+    });
+
+    // Update the presentation's reviewersAssigned field
+    await presentationRef.update({
+      reviewersAssigned: admin.firestore.FieldValue.arrayUnion(reviewerId),
+    });
+
+    res.status(200).json({ message: "Assignment successful" });
+  } catch (error) {
+    console.error("Error assigning presentation to reviewer:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 //########################################################################
 //Reminder email section
