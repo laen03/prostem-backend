@@ -1828,16 +1828,34 @@ app.get("/api/conferences/presentations/:id", async (req, res) => {
 
 
 //Endpoint to get a specific conference
-app.get("/api/conferences/:id", async (req, res) =>{
-  try{
-    const id = req.params.id
-    const doc = await conferencesDB.doc(id).get()
-    res.status(201).json({"id": doc.id, ...doc.data})
-  }catch(error){
-    res.status(500).json({"error": error.message})
-  }
-})
+app.get("/api/conferences/getConference/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
 
+    // Log the requested ID
+    console.log("Requested Conference ID:", id);
+
+    const doc = await db.collection("conferences").doc(id).get();
+
+    // Log the document snapshot and its data
+    console.log("Document Exists:", doc.exists);
+    console.log("Document Data:", doc.data());
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: "Conference not found" });
+    }
+
+    const data = doc.data();
+    if (!data) {
+      return res.status(404).json({ error: "Conference data is empty" });
+    }
+
+    res.status(200).json({ id: doc.id, ...data });
+  } catch (error) {
+    console.error("Error fetching conference:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 //Endpoint to create a new presentation
 app.post("/api/conferences/presentations", async (req, res)=>{
@@ -1949,6 +1967,188 @@ app.post("/api/reviewers/assignReviewer", async (req, res) => {
   } catch (error) {
     console.error("Error assigning presentation to reviewer:", error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+//Endpoint to toggle the "active" field of a conference
+app.patch("/api/conferences/:id/toggleActive", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    // Get the conference document
+    const docRef = db.collection("conferences").doc(id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: "Conference not found" });
+    }
+
+    // Get the current value of the "active" field
+    const currentActiveState = doc.data().active;
+
+    // Toggle the "active" field
+    await docRef.update({
+      active: !currentActiveState,
+    });
+
+    res.status(200).json({ message: "Conference state updated successfully", active: !currentActiveState });
+  } catch (error) {
+    console.error("Error toggling conference state:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+//Endpoint to toggle the assignment of a reviewer for a presentation
+app.patch("/api/toggleAssignment", async (req, res) => {
+  try {
+    const { reviewerId, presentationId } = req.body;
+
+    if (!reviewerId || !presentationId) {
+      return res.status(400).json({ error: "Reviewer ID and Presentation ID are required" });
+    }
+
+    const reviewerRef = db.collection("reviewers").doc(reviewerId);
+    const presentationRef = db.collection("presentations").doc(presentationId);
+
+    // Get the current data for both reviewer and presentation
+    const reviewerDoc = await reviewerRef.get();
+    const presentationDoc = await presentationRef.get();
+
+    if (!reviewerDoc.exists) {
+      return res.status(404).json({ error: "Reviewer not found" });
+    }
+
+    if (!presentationDoc.exists) {
+      return res.status(404).json({ error: "Presentation not found" });
+    }
+
+    const reviewerData = reviewerDoc.data();
+    const presentationData = presentationDoc.data();
+
+    const isAssigned = reviewerData.presentationsAssigned?.includes(presentationId);
+
+    if (isAssigned) {
+      // If already assigned, remove the assignment
+      await reviewerRef.update({
+        presentationsAssigned: admin.firestore.FieldValue.arrayRemove(presentationId),
+      });
+
+      await presentationRef.update({
+        reviewersAssigned: admin.firestore.FieldValue.arrayRemove(reviewerId),
+      });
+
+      res.status(200).json({ message: "Assignment removed successfully" });
+    } else {
+      // If not assigned, add the assignment
+      await reviewerRef.update({
+        presentationsAssigned: admin.firestore.FieldValue.arrayUnion(presentationId),
+      });
+
+      await presentationRef.update({
+        reviewersAssigned: admin.firestore.FieldValue.arrayUnion(reviewerId),
+      });
+
+      res.status(200).json({ message: "Assignment added successfully" });
+    }
+  } catch (error) {
+    console.error("Error toggling assignment:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+//Endpoint to check if a reviewer is assigned to a presentation
+app.get("/api/isAssigned", async (req, res) => {
+  try {
+    const { reviewerId, presentationId } = req.query;
+
+    if (!reviewerId || !presentationId) {
+      return res.status(400).json({ error: "Reviewer ID and Presentation ID are required" });
+    }
+
+    const reviewerRef = db.collection("reviewers").doc(reviewerId);
+    const reviewerDoc = await reviewerRef.get();
+
+    if (!reviewerDoc.exists) {
+      return res.status(404).json({ error: "Reviewer not found" });
+    }
+
+    const reviewerData = reviewerDoc.data();
+    const isAssigned = reviewerData.presentationsAssigned?.includes(presentationId) || false;
+
+    res.status(200).json({ isAssigned });
+  } catch (error) {
+    console.error("Error checking assignment:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+//create a presentation by user
+app.post('/api/presentations', async (req, res) => {
+  try {
+    const { userId, conferenceId, title, description, ...otherFields } = req.body;
+
+    if (!userId || !conferenceId || !title || !description) {
+      return res.status(400).json({ error: 'userId, conferenceId, title, and description are required' });
+    }
+
+    // Create a new presentation
+    const presentationRef = db.collection('presentations').doc();
+    const presentationId = presentationRef.id;
+
+    const presentationData = {
+      'creator-id': userId,
+      'conference-id': conferenceId,
+      title,
+      description,
+      ...otherFields, // Include any additional fields provided in the request
+      createdAt: new Date().toISOString(),
+    };
+
+    await presentationRef.set(presentationData);
+
+    // Update the user's document
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const updatedPresentations = userData['presentations-author'] || [];
+    const updatedConferences = userData['conferences-author'] || [];
+
+    updatedPresentations.push(presentationId);
+    if (!updatedConferences.includes(conferenceId)) {
+      updatedConferences.push(conferenceId);
+    }
+
+    await userRef.update({
+      'presentations-author': updatedPresentations,
+      'conferences-author': updatedConferences,
+    });
+
+    // Update the conference document
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+
+    const conferenceData = conferenceDoc.data();
+    const updatedConferencePresentations = conferenceData.presentations || [];
+
+    updatedConferencePresentations.push(presentationId);
+
+    await conferenceRef.update({
+      presentations: updatedConferencePresentations,
+    });
+
+    res.status(201).json({ message: 'Presentation created successfully', presentationId });
+  } catch (error) {
+    console.error('Error creating presentation:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
