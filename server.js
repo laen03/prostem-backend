@@ -2153,6 +2153,99 @@ app.post('/api/presentations', async (req, res) => {
 });
 
 
+// Endpoint to get all conferences in which the current user has presentations
+app.get('/api/user-conferences/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    // Get the user's document
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const presentationsAuthor = userData['presentations-author'] || [];
+
+    // Get all unique conference IDs from the user's presentations
+    const conferenceIds = new Set();
+    for (const presentationId of presentationsAuthor) {
+      const presentationRef = db.collection('presentations').doc(presentationId);
+      const presentationDoc = await presentationRef.get();
+
+      if (presentationDoc.exists) {
+        const presentationData = presentationDoc.data();
+        if (presentationData['conference-id']) {
+          conferenceIds.add(presentationData['conference-id']);
+        }
+      }
+    }
+
+    // Fetch all conference details
+    const conferences = [];
+    for (const conferenceId of conferenceIds) {
+      const conferenceRef = db.collection('conferences').doc(conferenceId);
+      const conferenceDoc = await conferenceRef.get();
+
+      if (conferenceDoc.exists) {
+        conferences.push({ id: conferenceDoc.id, ...conferenceDoc.data() });
+      }
+    }
+
+    res.status(200).json(conferences);
+  } catch (error) {
+    console.error('Error fetching user conferences:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to get all presentations for a specific user and conference
+app.get('/api/user-conference-presentations', async (req, res) => {
+  try {
+    const { userId, conferenceId } = req.query;
+
+    if (!userId || !conferenceId) {
+      return res.status(400).json({ error: 'User ID and Conference ID are required' });
+    }
+
+    // Get the user's document
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const presentationsAuthor = userData['presentations-author'] || [];
+
+    // Fetch all presentations that match the conference ID
+    const presentations = [];
+    for (const presentationId of presentationsAuthor) {
+      const presentationRef = db.collection('presentations').doc(presentationId);
+      const presentationDoc = await presentationRef.get();
+
+      if (presentationDoc.exists) {
+        const presentationData = presentationDoc.data();
+        if (presentationData['conference-id'] === conferenceId) {
+          presentations.push({ id: presentationDoc.id, ...presentationData });
+        }
+      }
+    }
+
+    res.status(200).json(presentations);
+  } catch (error) {
+    console.error('Error fetching user conference presentations:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 //########################################################################
 //Reminder email section
 
