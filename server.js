@@ -10,7 +10,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 require("dotenv").config(); // carga las variables de .env
-
+const path = require('path');
+const fs = require('fs');
 
 
 require("dotenv").config();
@@ -2082,75 +2083,6 @@ app.get("/api/isAssigned", async (req, res) => {
   }
 });
 
-//create a presentation by user
-app.post('/api/presentations', async (req, res) => {
-  try {
-    const { userId, conferenceId, title, description, ...otherFields } = req.body;
-
-    if (!userId || !conferenceId || !title || !description) {
-      return res.status(400).json({ error: 'userId, conferenceId, title, and description are required' });
-    }
-
-    // Create a new presentation
-    const presentationRef = db.collection('presentations').doc();
-    const presentationId = presentationRef.id;
-
-    const presentationData = {
-      'creator-id': userId,
-      'conference-id': conferenceId,
-      title,
-      description,
-      ...otherFields, // Include any additional fields provided in the request
-      createdAt: new Date().toISOString(),
-    };
-
-    await presentationRef.set(presentationData);
-
-    // Update the user's document
-    const userRef = db.collection('users').doc(userId);
-    const userDoc = await userRef.get();
-
-    if (!userDoc.exists) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const userData = userDoc.data();
-    const updatedPresentations = userData['presentations-author'] || [];
-    const updatedConferences = userData['conferences-author'] || [];
-
-    updatedPresentations.push(presentationId);
-    if (!updatedConferences.includes(conferenceId)) {
-      updatedConferences.push(conferenceId);
-    }
-
-    await userRef.update({
-      'presentations-author': updatedPresentations,
-      'conferences-author': updatedConferences,
-    });
-
-    // Update the conference document
-    const conferenceRef = db.collection('conferences').doc(conferenceId);
-    const conferenceDoc = await conferenceRef.get();
-
-    if (!conferenceDoc.exists) {
-      return res.status(404).json({ error: 'Conference not found' });
-    }
-
-    const conferenceData = conferenceDoc.data();
-    const updatedConferencePresentations = conferenceData.presentations || [];
-
-    updatedConferencePresentations.push(presentationId);
-
-    await conferenceRef.update({
-      presentations: updatedConferencePresentations,
-    });
-
-    res.status(201).json({ message: 'Presentation created successfully', presentationId });
-  } catch (error) {
-    console.error('Error creating presentation:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 
 // Endpoint to get all conferences in which the current user has presentations
@@ -2319,7 +2251,118 @@ cron.schedule("16 14 * * *", async () => {
 //################################################################################################
 
 
+// Configuración de Multer para manejar la subida de archivos
+const fileUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadPath = path.join(__dirname, 'uploads');
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      cb(null, `${uniqueSuffix}-${file.originalname}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    const allowedExtensions = ['.pdf', '.doc', '.docx', '.ppt', '.pptx'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!allowedExtensions.includes(ext)) {
+      return cb(new Error('Only PDF, Word, and PowerPoint files are allowed'));
+    }
+    cb(null, true);
+  }
+});
 
+// Endpoint para crear una presentación con documentos
+app.post('/api/presentations', fileUpload.fields([
+  { name: 'generalDocument', maxCount: 1 },
+  { name: 'presentationFile', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { userId, conferenceId, title, description, ...otherFields } = req.body;
+
+    if (!userId || !conferenceId || !title || !description) {
+      return res.status(400).json({ error: 'userId, conferenceId, title, and description are required' });
+    }
+
+    // Verificar si los archivos fueron subidos
+    const generalDocument = req.files['generalDocument'] ? req.files['generalDocument'][0] : null;
+    const presentationFile = req.files['presentationFile'] ? req.files['presentationFile'][0] : null;
+
+    if (!generalDocument || !presentationFile) {
+      return res.status(400).json({ error: 'Both generalDocument and presentationFile are required' });
+    }
+
+    // Crear una nueva presentación
+    const presentationRef = db.collection('presentations').doc();
+    const presentationId = presentationRef.id;
+
+    const presentationData = {
+      'creator-id': userId,
+      'conference-id': conferenceId,
+      title,
+      description,
+      generalDocumentPath: generalDocument.filename, // Guardar el nombre del archivo
+      presentationFilePath: presentationFile.filename, // Guardar el nombre del archivo
+      ...otherFields, // Incluir otros campos adicionales
+      createdAt: new Date().toISOString(),
+    };
+
+    await presentationRef.set(presentationData);
+
+    // Actualizar el documento del usuario
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const updatedPresentations = userData['presentations-author'] || [];
+    const updatedConferences = userData['conferences-author'] || [];
+
+    updatedPresentations.push(presentationId);
+    if (!updatedConferences.includes(conferenceId)) {
+      updatedConferences.push(conferenceId);
+    }
+
+    await userRef.update({
+      'presentations-author': updatedPresentations,
+      'conferences-author': updatedConferences,
+    });
+
+    // Actualizar el documento de la conferencia
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+
+    const conferenceData = conferenceDoc.data();
+    const updatedConferencePresentations = conferenceData.presentations || [];
+
+    updatedConferencePresentations.push(presentationId);
+
+    await conferenceRef.update({
+      presentations: updatedConferencePresentations,
+    });
+
+    res.status(201).json({
+      message: 'Presentation created successfully',
+      presentationId,
+      generalDocumentPath: generalDocument.filename,
+      presentationFilePath: presentationFile.filename
+    });
+  } catch (error) {
+    console.error('Error creating presentation:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 //#################################################################################################
 
