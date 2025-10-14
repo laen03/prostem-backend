@@ -2288,15 +2288,7 @@ app.post('/api/presentations', fileUpload.fields([
       return res.status(400).json({ error: 'userId, conferenceId, title, and description are required' });
     }
 
-    // Verificar si los archivos fueron subidos
-    const generalDocument = req.files['generalDocument'] ? req.files['generalDocument'][0] : null;
-    const presentationFile = req.files['presentationFile'] ? req.files['presentationFile'][0] : null;
-
-    if (!generalDocument || !presentationFile) {
-      return res.status(400).json({ error: 'Both generalDocument and presentationFile are required' });
-    }
-
-    // Crear una nueva presentación
+    // Paso 1: Crear la ponencia sin los documentos
     const presentationRef = db.collection('presentations').doc();
     const presentationId = presentationRef.id;
 
@@ -2305,13 +2297,45 @@ app.post('/api/presentations', fileUpload.fields([
       'conference-id': conferenceId,
       title,
       description,
-      generalDocumentPath: generalDocument.filename, // Guardar el nombre del archivo
-      presentationFilePath: presentationFile.filename, // Guardar el nombre del archivo
       ...otherFields, // Incluir otros campos adicionales
       createdAt: new Date().toISOString(),
     };
 
     await presentationRef.set(presentationData);
+
+    // Paso 2: Guardar los documentos en una subcarpeta con el presentationId como nombre
+    const generalDocument = req.files['generalDocument'] ? req.files['generalDocument'][0] : null;
+    const presentationFile = req.files['presentationFile'] ? req.files['presentationFile'][0] : null;
+
+    if (!generalDocument || !presentationFile) {
+      return res.status(400).json({ error: 'Both generalDocument and presentationFile are required' });
+    }
+
+    // Crear una subcarpeta con el nombre del presentationId
+    const uploadPath = path.join(__dirname, 'uploads', presentationId);
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+
+    // Generar las rutas de los archivos dentro de la subcarpeta
+    const generalDocumentPath = path.join(uploadPath, `general-${generalDocument.originalname}`);
+    const presentationFilePath = path.join(uploadPath, `presentation-${presentationFile.originalname}`);
+
+    // Renombrar y mover los archivos al directorio de uploads/presentationId
+    fs.renameSync(
+      path.join(__dirname, 'uploads', generalDocument.filename),
+      generalDocumentPath
+    );
+    fs.renameSync(
+      path.join(__dirname, 'uploads', presentationFile.filename),
+      presentationFilePath
+    );
+
+    // Guardar las rutas relativas en la base de datos
+    await presentationRef.update({
+      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`,
+      presentationFilePath: `/uploads/${presentationId}/presentation-${presentationFile.originalname}`
+    });
 
     // Actualizar el documento del usuario
     const userRef = db.collection('users').doc(userId);
@@ -2355,8 +2379,8 @@ app.post('/api/presentations', fileUpload.fields([
     res.status(201).json({
       message: 'Presentation created successfully',
       presentationId,
-      generalDocumentPath: generalDocument.filename,
-      presentationFilePath: presentationFile.filename
+      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`,
+      presentationFilePath: `/uploads/${presentationId}/presentation-${presentationFile.originalname}`
     });
   } catch (error) {
     console.error('Error creating presentation:', error);
