@@ -1858,17 +1858,58 @@ app.get("/api/conferences/getConference/:id", async (req, res) => {
   }
 });
 
-//Endpoint to create a new presentation
-app.post("/api/conferences/presentations", async (req, res)=>{
-  
-  try{
-    const data = req.body
-    await presentationsDB.add(data)
-    res.status(201).json({"result": "conference updated successfully"})
-  }catch(error){
-    res.status(500).json({"error": error.message})
+// Endpoint to create a new presentation
+app.post("/api/conferences/presentations", async (req, res) => {
+  try {
+    const data = req.body;
+
+    // Extract the area from the request body
+    const { area, ...presentationData } = data; // Exclude "area" from the rest of the data
+
+    if (!area) {
+      return res.status(400).json({ Error: "The 'area' field is required." });
+    }
+
+    // Format the area: First letter uppercase, rest lowercase
+    const originalWord = area.charAt(0).toUpperCase() + area.slice(1).toLowerCase();
+
+    // Normalize the area: Remove special characters (e.g., tildes) for comparison
+    const normalizedWord = originalWord
+      .normalize("NFD") // Normalize to decompose special characters
+      .replace(/[\u0300-\u036f]/g, ""); // Remove diacritical marks (e.g., tildes)
+
+    let areaId;
+
+    // Check if the normalized area exists in the "areas" collection
+    const areasSnapshot = await db.collection("areas").where("name", "==", normalizedWord).get();
+
+    if (!areasSnapshot.empty) {
+      // If the area exists, take the ID of the matching document
+      areaId = areasSnapshot.docs[0].id;
+    } else {
+      // If the area does not exist, create a new document in the "areas" collection
+      const newArea = await db.collection("areas").add({
+        name: normalizedWord, // Save the normalized word without special characters
+        originalWord: originalWord, // Save the original word with the tilde
+      });
+      areaId = newArea.id;
+    }
+
+    // Add the area ID to the "areas" field in the presentations collection
+    const presentationWithAreas = {
+      ...presentationData,
+      areas: [areaId], // Add the area ID to the "areas" field as an array
+    };
+
+    // Create the new presentation in the "presentations" collection
+    await presentationsDB.add(presentationWithAreas);
+
+    // Respond with a success message
+    res.status(201).json({ result: "presentation created successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-})
+});
 
 //Endpoint to modify a presentation
 app.put("/api/conferences/presentations/:id", async (req, res) =>{
@@ -1891,17 +1932,58 @@ app.delete("/api/conferences/presentations/:id", async (req, res) => {
   }
 })
 
-//Endpoint to create new reviewers
-app.post("/api/reviewers", async (req, res) =>{
-  try{
-    const data = req.body
-    const newReviewer = await db.collection("reviewers").add(data);
-    res.status(201).json({"New reviewer":newReviewer.id, ...data})
-  }catch(error){
-    res.status(500).json({"Error": error.message})
-  }
+// Endpoint to create new reviewers
+app.post("/api/reviewers", async (req, res) => {
+  try {
+    const data = req.body;
 
-})
+    // Extract the area from the request body
+    const { area, ...reviewerData } = data; // Exclude "area" from the rest of the data
+
+    if (!area) {
+      return res.status(400).json({ Error: "The 'area' field is required." });
+    }
+
+    // Format the area: First letter uppercase, rest lowercase
+    const originalWord = area.charAt(0).toUpperCase() + area.slice(1).toLowerCase();
+
+    // Normalize the area: Remove special characters (e.g., tildes) for comparison
+    const normalizedWord = originalWord
+      .normalize("NFD") // Normalize to decompose special characters
+      .replace(/[\u0300-\u036f]/g, ""); // Remove diacritical marks (e.g., tildes)
+
+    let areaId;
+
+    // Check if the normalized area exists in the "areas" collection
+    const areasSnapshot = await db.collection("areas").where("name", "==", normalizedWord).get();
+
+    if (!areasSnapshot.empty) {
+      // If the area exists, take the ID of the matching document
+      areaId = areasSnapshot.docs[0].id;
+    } else {
+      // If the area does not exist, create a new document in the "areas" collection
+      const newArea = await db.collection("areas").add({
+        name: normalizedWord, // Save the normalized word without special characters
+        originalWord: originalWord, // Save the original word with the tilde
+      });
+      areaId = newArea.id;
+    }
+
+    // Add the area ID to the "areas" field in the reviewers collection
+    const reviewerWithAreas = {
+      ...reviewerData,
+      areas: [areaId], // Add the area ID to the "areas" field as an array
+    };
+
+    // Create the new reviewer in the "reviewers" collection
+    const newReviewer = await db.collection("reviewers").add(reviewerWithAreas);
+
+    // Respond with the new reviewer ID and data
+    res.status(201).json({ "New reviewer": newReviewer.id, ...reviewerWithAreas });
+  } catch (error) {
+    res.status(500).json({ Error: error.message });
+  }
+});
 
 //Endpoint to update a specific reviewer
 app.put("/api/reviewers/:id", async (req, res) => {
@@ -2178,6 +2260,34 @@ app.get('/api/user-conference-presentations', async (req, res) => {
   }
 });
 
+
+
+// Endpoint to create a new revision form
+app.post('/api/revision-forms', async (req, res) => {
+  try {
+    const { title, questions } = req.body;
+
+    if (!title || !questions || !Array.isArray(questions)) {
+      return res.status(400).json({ error: 'El título y las preguntas son obligatorios.' });
+    }
+
+    // Crear un nuevo documento en la colección "revision-forms"
+    const revisionFormRef = db.collection('revision-forms').doc();
+    const revisionFormData = {
+      title,
+      questions,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await revisionFormRef.set(revisionFormData);
+
+    res.status(201).json({ message: 'Formulario de revisión creado exitosamente', id: revisionFormRef.id });
+  } catch (error) {
+    console.error('Error al crear el formulario de revisión:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
 //########################################################################
 //Reminder email section
 
@@ -2247,6 +2357,23 @@ cron.schedule("16 14 * * *", async () => {
 
 })
 
+// Endpoint to get all "name" fields from the "areas" collection
+app.get('/api/areas/names', async (req, res) => {
+  try {
+    // Fetch all documents from the "areas" collection
+    const areasSnapshot = await db.collection('areas').get();
+
+    // Extract the "name" field from each document
+    const areaNames = areasSnapshot.docs.map(doc => doc.data().name);
+
+    // Return the array of names
+    res.status(200).json({ names: areaNames });
+  } catch (error) {
+    console.error('Error fetching areas:', error);
+    res.status(500).json({ error: 'Failed to fetch areas' });
+  }
+});
+
 
 //################################################################################################
 
@@ -2282,10 +2409,35 @@ app.post('/api/presentations', fileUpload.fields([
   { name: 'presentationFile', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { userId, conferenceId, title, description, ...otherFields } = req.body;
+    const { userId, conferenceId, title, description, area, ...otherFields } = req.body;
 
-    if (!userId || !conferenceId || !title || !description) {
-      return res.status(400).json({ error: 'userId, conferenceId, title, and description are required' });
+    if (!userId || !conferenceId || !title || !description || !area) {
+      return res.status(400).json({ error: 'userId, conferenceId, title, description, and area are required' });
+    }
+
+    // Format the area: First letter uppercase, rest lowercase
+    const originalWord = area.charAt(0).toUpperCase() + area.slice(1).toLowerCase();
+
+    // Normalize the area: Remove special characters (e.g., tildes) for comparison
+    const normalizedWord = originalWord
+      .normalize("NFD") // Normalize to decompose special characters
+      .replace(/[\u0300-\u036f]/g, ""); // Remove diacritical marks (e.g., tildes)
+
+    let areaId;
+
+    // Check if the normalized area exists in the "areas" collection
+    const areasSnapshot = await db.collection("areas").where("name", "==", normalizedWord).get();
+
+    if (!areasSnapshot.empty) {
+      // If the area exists, take the ID of the matching document
+      areaId = areasSnapshot.docs[0].id;
+    } else {
+      // If the area does not exist, create a new document in the "areas" collection
+      const newArea = await db.collection("areas").add({
+        name: normalizedWord, // Save the normalized word without special characters
+        originalWord: originalWord, // Save the original word with the tilde
+      });
+      areaId = newArea.id;
     }
 
     // Paso 1: Crear la ponencia sin los documentos
@@ -2297,6 +2449,7 @@ app.post('/api/presentations', fileUpload.fields([
       'conference-id': conferenceId,
       title,
       description,
+      areas: [areaId], // Add the area ID to the "areas" field as an array
       ...otherFields, // Incluir otros campos adicionales
       createdAt: new Date().toISOString(),
     };
