@@ -1944,35 +1944,10 @@ app.post("/api/reviewers", async (req, res) => {
       return res.status(400).json({ Error: "The 'area' field is required." });
     }
 
-    // Format the area: First letter uppercase, rest lowercase
-    const originalWord = area.charAt(0).toUpperCase() + area.slice(1).toLowerCase();
-
-    // Normalize the area: Remove special characters (e.g., tildes) for comparison
-    const normalizedWord = originalWord
-      .normalize("NFD") // Normalize to decompose special characters
-      .replace(/[\u0300-\u036f]/g, ""); // Remove diacritical marks (e.g., tildes)
-
-    let areaId;
-
-    // Check if the normalized area exists in the "areas" collection
-    const areasSnapshot = await db.collection("areas").where("name", "==", normalizedWord).get();
-
-    if (!areasSnapshot.empty) {
-      // If the area exists, take the ID of the matching document
-      areaId = areasSnapshot.docs[0].id;
-    } else {
-      // If the area does not exist, create a new document in the "areas" collection
-      const newArea = await db.collection("areas").add({
-        name: normalizedWord, // Save the normalized word without special characters
-        originalWord: originalWord, // Save the original word with the tilde
-      });
-      areaId = newArea.id;
-    }
-
-    // Add the area ID to the "areas" field in the reviewers collection
+    // Add the area directly to the "areas" field in the reviewers collection
     const reviewerWithAreas = {
       ...reviewerData,
-      areas: [areaId], // Add the area ID to the "areas" field as an array
+      areas: [area], // Add the area directly as an array
     };
 
     // Create the new reviewer in the "reviewers" collection
@@ -2136,6 +2111,45 @@ app.patch("/api/toggleAssignment", async (req, res) => {
   } catch (error) {
     console.error("Error toggling assignment:", error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint to create a new area
+app.post("/api/areas", async (req, res) => {
+  try {
+    const { area } = req.body;
+
+    if (!area) {
+      return res.status(400).json({ Error: "The 'area' field is required." });
+    }
+
+    // Format the area: First letter uppercase, rest lowercase
+    const originalWord = area.charAt(0).toUpperCase() + area.slice(1).toLowerCase();
+
+    // Normalize the area: Remove special characters (e.g., tildes) for comparison
+    const normalizedWord = originalWord
+      .normalize("NFD") // Normalize to decompose special characters
+      .replace(/[\u0300-\u036f]/g, ""); // Remove diacritical marks (e.g., tildes)
+
+    // Check if the normalized area exists in the "areas" collection
+    const areasSnapshot = await db.collection("areas").where("name", "==", normalizedWord).get();
+
+    if (!areasSnapshot.empty) {
+      // If the area exists, return a message indicating it already exists
+      return res.status(409).json({ message: "Area already exists", area: areasSnapshot.docs[0].data() });
+    }
+
+    // If the area does not exist, create a new document in the "areas" collection
+    const newArea = await db.collection("areas").add({
+      name: normalizedWord, // Save the normalized word without special characters
+      originalWord: originalWord, // Save the original word with the tilde
+    });
+
+    // Respond with the new area ID and data
+    res.status(201).json({ message: "Area created successfully", id: newArea.id, name: normalizedWord, originalWord });
+  } catch (error) {
+    console.error("Error creating area:", error);
+    res.status(500).json({ Error: error.message });
   }
 });
 
@@ -2415,31 +2429,6 @@ app.post('/api/presentations', fileUpload.fields([
       return res.status(400).json({ error: 'userId, conferenceId, title, description, and area are required' });
     }
 
-    // Format the area: First letter uppercase, rest lowercase
-    const originalWord = area.charAt(0).toUpperCase() + area.slice(1).toLowerCase();
-
-    // Normalize the area: Remove special characters (e.g., tildes) for comparison
-    const normalizedWord = originalWord
-      .normalize("NFD") // Normalize to decompose special characters
-      .replace(/[\u0300-\u036f]/g, ""); // Remove diacritical marks (e.g., tildes)
-
-    let areaId;
-
-    // Check if the normalized area exists in the "areas" collection
-    const areasSnapshot = await db.collection("areas").where("name", "==", normalizedWord).get();
-
-    if (!areasSnapshot.empty) {
-      // If the area exists, take the ID of the matching document
-      areaId = areasSnapshot.docs[0].id;
-    } else {
-      // If the area does not exist, create a new document in the "areas" collection
-      const newArea = await db.collection("areas").add({
-        name: normalizedWord, // Save the normalized word without special characters
-        originalWord: originalWord, // Save the original word with the tilde
-      });
-      areaId = newArea.id;
-    }
-
     // Paso 1: Crear la ponencia sin los documentos
     const presentationRef = db.collection('presentations').doc();
     const presentationId = presentationRef.id;
@@ -2449,7 +2438,7 @@ app.post('/api/presentations', fileUpload.fields([
       'conference-id': conferenceId,
       title,
       description,
-      areas: [areaId], // Add the area ID to the "areas" field as an array
+      area, // Add the area directly as it comes
       ...otherFields, // Incluir otros campos adicionales
       createdAt: new Date().toISOString(),
     };
