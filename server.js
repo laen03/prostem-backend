@@ -2153,6 +2153,22 @@ app.post("/api/areas", async (req, res) => {
   }
 });
 
+// Endpoint to get the list of areas
+app.get('/api/areas', async (req, res) => {
+  try {
+    // Fetch all documents from the "areas" collection
+    const areasSnapshot = await db.collection('areas').get();
+
+    // Map the results to return only the "originalWord" field
+    const areas = areasSnapshot.docs.map(doc => doc.data().originalWord);
+
+    res.status(200).json({ areas });
+  } catch (error) {
+    console.error('Error fetching areas:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 //Endpoint to check if a reviewer is assigned to a presentation
 app.get("/api/isAssigned", async (req, res) => {
   try {
@@ -2302,6 +2318,59 @@ app.post('/api/revision-forms', async (req, res) => {
   }
 });
 
+// Endpoint to find reviewers by presentation area
+app.get('/api/reviewers-by-presentation/:presentationId', async (req, res) => {
+  try {
+    const { presentationId } = req.params;
+
+    // Step 1: Fetch the presentation document
+    const presentationDoc = await db.collection('presentations').doc(presentationId).get();
+
+    if (!presentationDoc.exists) {
+      return res.status(404).json({ error: 'Presentation not found.' });
+    }
+
+    const presentationData = presentationDoc.data();
+    const presentationArea = presentationData.area;
+
+    if (!presentationArea) {
+      return res.status(400).json({ error: 'The presentation does not have an area defined.' });
+    }
+
+    // Step 2: Fetch all reviewers
+    const reviewersSnapshot = await db.collection('reviewers').get();
+    const matchingReviewers = [];
+
+    reviewersSnapshot.forEach((reviewerDoc) => {
+      const reviewerData = reviewerDoc.data();
+      const reviewerAreas = reviewerData.areas || [];
+
+      // Check if the reviewer's areas include the presentation area
+      if (reviewerAreas.includes(presentationArea)) {
+        matchingReviewers.push({
+          id: reviewerDoc.id,
+          name: reviewerData.name || null,
+          country: reviewerData.country || null,
+          email: reviewerData.email || null,
+          institution: reviewerData.institution || null,
+          doi_orcid: reviewerData.doi_orcid || null,
+          areas: reviewerAreas,
+          presentationsAssigned: reviewerData.presentationsAssigned ? reviewerData.presentationsAssigned.length : 0,
+        });
+      }
+    });
+
+    // Step 3: Return the matching reviewers or a message if none are found
+    if (matchingReviewers.length === 0) {
+      return res.status(404).json({ message: 'No reviewers found for the specified area.' });
+    }
+
+    res.status(200).json({ reviewers: matchingReviewers });
+  } catch (error) {
+    console.error('Error finding reviewers by presentation area:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 //########################################################################
 //Reminder email section
 
@@ -2389,6 +2458,40 @@ app.get('/api/areas/names', async (req, res) => {
 });
 
 
+// Endpoint to get the area and title of a presentation by its ID
+app.get('/api/presentations/area-title/:presentationId', async (req, res) => {
+  try {
+    const { presentationId } = req.params;
+
+    // Fetch the presentation document
+    const presentationDoc = await db.collection('presentations').doc(presentationId).get();
+
+    if (!presentationDoc.exists) {
+      return res.status(404).json({ error: 'Presentation not found.' });
+    }
+
+    const presentationData = presentationDoc.data();
+
+    // Check if the area field exists
+    if (!presentationData.area) {
+      return res.status(400).json({ error: 'The presentation does not have an area defined.' });
+    }
+
+    // Check if the title field exists
+    if (!presentationData.title) {
+      return res.status(400).json({ error: 'The presentation does not have a title defined.' });
+    }
+
+    // Return the area and title fields
+    res.status(200).json({ 
+      area: presentationData.area,
+      title: presentationData.title
+    });
+  } catch (error) {
+    console.error('Error fetching presentation area and title:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 //################################################################################################
 
 
@@ -2419,13 +2522,12 @@ const fileUpload = multer({
 
 // Endpoint para crear una presentación con documentos
 app.post('/api/presentations', fileUpload.fields([
-  { name: 'generalDocument', maxCount: 1 },
-  { name: 'presentationFile', maxCount: 1 }
+  { name: 'generalDocument', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { userId, conferenceId, title, description, area, ...otherFields } = req.body;
+    const { userId, conferenceId, title, summary, area, ...otherFields } = req.body;
 
-    if (!userId || !conferenceId || !title || !description || !area) {
+    if (!userId || !conferenceId || !title || !summary || !area) {
       return res.status(400).json({ error: 'userId, conferenceId, title, description, and area are required' });
     }
 
@@ -2437,7 +2539,7 @@ app.post('/api/presentations', fileUpload.fields([
       'creator-id': userId,
       'conference-id': conferenceId,
       title,
-      description,
+      summary,
       area, // Add the area directly as it comes
       ...otherFields, // Incluir otros campos adicionales
       createdAt: new Date().toISOString(),
@@ -2445,12 +2547,11 @@ app.post('/api/presentations', fileUpload.fields([
 
     await presentationRef.set(presentationData);
 
-    // Paso 2: Guardar los documentos en una subcarpeta con el presentationId como nombre
+    // Paso 2: Guardar el documento general en una subcarpeta con el presentationId como nombre
     const generalDocument = req.files['generalDocument'] ? req.files['generalDocument'][0] : null;
-    const presentationFile = req.files['presentationFile'] ? req.files['presentationFile'][0] : null;
 
-    if (!generalDocument || !presentationFile) {
-      return res.status(400).json({ error: 'Both generalDocument and presentationFile are required' });
+    if (!generalDocument) {
+      return res.status(400).json({ error: 'The generalDocument is required' });
     }
 
     // Crear una subcarpeta con el nombre del presentationId
@@ -2459,24 +2560,18 @@ app.post('/api/presentations', fileUpload.fields([
       fs.mkdirSync(uploadPath, { recursive: true });
     }
 
-    // Generar las rutas de los archivos dentro de la subcarpeta
+    // Generar la ruta del archivo dentro de la subcarpeta
     const generalDocumentPath = path.join(uploadPath, `general-${generalDocument.originalname}`);
-    const presentationFilePath = path.join(uploadPath, `presentation-${presentationFile.originalname}`);
 
-    // Renombrar y mover los archivos al directorio de uploads/presentationId
+    // Renombrar y mover el archivo al directorio de uploads/presentationId
     fs.renameSync(
       path.join(__dirname, 'uploads', generalDocument.filename),
       generalDocumentPath
     );
-    fs.renameSync(
-      path.join(__dirname, 'uploads', presentationFile.filename),
-      presentationFilePath
-    );
 
-    // Guardar las rutas relativas en la base de datos
+    // Guardar la ruta relativa en la base de datos
     await presentationRef.update({
-      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`,
-      presentationFilePath: `/uploads/${presentationId}/presentation-${presentationFile.originalname}`
+      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`
     });
 
     // Actualizar el documento del usuario
@@ -2521,8 +2616,7 @@ app.post('/api/presentations', fileUpload.fields([
     res.status(201).json({
       message: 'Presentation created successfully',
       presentationId,
-      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`,
-      presentationFilePath: `/uploads/${presentationId}/presentation-${presentationFile.originalname}`
+      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`
     });
   } catch (error) {
     console.error('Error creating presentation:', error);
