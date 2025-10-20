@@ -1714,51 +1714,88 @@ app.post("/api/conferences", async (req, res) =>{
   }
 })
 
-//Endpoint to create a new conference for a specific user
-app.post("/api/conferences/:id", async (req, res) =>{
+// Endpoint to create a new conference for a specific user
+app.post("/api/conferences/:id", async (req, res) => {
+  try {
+    const managerId = req.params.id;
+    const data = req.body;
 
-  try{
-    const managerId = req.params.id
-    const data = req.body
+    // Fetch the user's document
+    const userRef = db.collection("users").doc(managerId);
+    const userDoc = await userRef.get();
 
-    const newConferenceData = {
-      ...data,
-      managerId: managerId
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
     }
 
-    const newConference = await conferencesDB.add(newConferenceData)
+    // Get the list of conference IDs managed by the user
+    const conferencesManager = userDoc.get("conferencesManager") || [];
+    let highestCreationId = 0;
 
-    const userRef = db.collection("users").doc(managerId)
-
-    await userRef.update({
-      conferencesManager: admin.firestore.FieldValue.arrayUnion(newConference.id)
-    })
-
-    res.status(201).json({"id": newConference.id, ...data})
-    
-  }catch(error){
-    res.status(500).json({"error": error.message})
-  }
-})
-
-//Endpoint to get all conferences for a specific user
-app.get("/api/conferences/:id", async (req, res) =>{
-  try{
-    const userId = req.params.id
-    const data = await conferencesDB.get()
-    const conferences = data.docs.map(doc => ({id: doc.id, ...doc.data()})) 
-    const userConferences = []
-
-    for(const conference of conferences){
-      if (conference.managerId == userId){
-        userConferences.push(conference)
+    // Iterate through the conferences to find the highest creationId
+    for (const conferenceId of conferencesManager) {
+      const conferenceDoc = await db.collection("conferences").doc(conferenceId).get();
+      if (conferenceDoc.exists) {
+        const creationId = conferenceDoc.get("creationId") || 0; // Default to 0 if creationId is missing
+        if (creationId > highestCreationId) {
+          highestCreationId = creationId; // Keep track of the highest creationId
+        }
       }
     }
-    res.status(201).json(userConferences)
-  }catch(error){
-    res.status(500).json({"error": error.message})
+
+    // Increment the highest creationId by 1
+    const newCreationId = highestCreationId + 1; // If highest is 4, newCreationId will be 5
+
+    // Add the new conference data
+    const newConferenceData = {
+      ...data,
+      managerId: managerId,
+      creationId: newCreationId, // Assign the calculated creationId
+    };
+
+    const newConference = await conferencesDB.add(newConferenceData);
+
+    // Create a folder in the uploads directory with the ID of the new conference
+    const uploadPath = path.join(__dirname, "uploads", newConference.id);
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+
+    // Update the user's conferencesManager field
+    await userRef.update({
+      conferencesManager: admin.firestore.FieldValue.arrayUnion(newConference.id),
+    });
+
+    res.status(201).json({ id: newConference.id, ...newConferenceData });
+  } catch (error) {
+    console.error("Error creating conference:", error);
+    res.status(500).json({ error: error.message });
   }
-})
+});
+
+// Endpoint to get all conferences for a specific user, ordered by creationId
+app.get("/api/conferences/:id", async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const data = await conferencesDB.get();
+    const conferences = data.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const userConferences = [];
+
+    // Filter conferences managed by the user
+    for (const conference of conferences) {
+      if (conference.managerId == userId) {
+        userConferences.push(conference);
+      }
+    }
+
+    // Sort the conferences by creationId in ascending order
+    userConferences.sort((a, b) => (a.creationId || 0) - (b.creationId || 0));
+
+    res.status(201).json(userConferences);
+  } catch (error) {
+    res.status(500).json({ "error": error.message });
+  }
+});
 
 //Endpoint to modify a conference
 app.put("/api/conferences/:id", async (req, res) => {
@@ -2531,7 +2568,33 @@ app.post('/api/presentations', fileUpload.fields([
       return res.status(400).json({ error: 'userId, conferenceId, title, description, and area are required' });
     }
 
-    // Paso 1: Crear la ponencia sin los documentos
+    // Paso 1: Obtener el highest creationId de las presentaciones de la conferencia
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+
+    const conferenceData = conferenceDoc.data();
+    const presentations = conferenceData.presentations || [];
+    let highestCreationId = 0;
+
+    // Iterar sobre las presentaciones para encontrar el highest creationId
+    for (const presentationId of presentations) {
+      const presentationDoc = await db.collection('presentations').doc(presentationId).get();
+      if (presentationDoc.exists) {
+        const creationId = presentationDoc.get('creationId') || 0; // Default to 0 if creationId is missing
+        if (creationId > highestCreationId) {
+          highestCreationId = creationId;
+        }
+      }
+    }
+
+    // Incrementar el highest creationId en 1
+    const newCreationId = highestCreationId + 1;
+
+    // Paso 2: Crear la ponencia sin los documentos
     const presentationRef = db.collection('presentations').doc();
     const presentationId = presentationRef.id;
 
@@ -2541,29 +2604,36 @@ app.post('/api/presentations', fileUpload.fields([
       title,
       summary,
       area, // Add the area directly as it comes
+      creationId: newCreationId, // Asignar el nuevo creationId
       ...otherFields, // Incluir otros campos adicionales
       createdAt: new Date().toISOString(),
     };
 
     await presentationRef.set(presentationData);
 
-    // Paso 2: Guardar el documento general en una subcarpeta con el presentationId como nombre
+    // Paso 3: Verificar si existe la carpeta de la conferencia
+    const conferenceFolderPath = path.join(__dirname, 'uploads', conferenceId);
+    if (!fs.existsSync(conferenceFolderPath)) {
+      return res.status(400).json({ error: `The folder for conference ${conferenceId} does not exist.` });
+    }
+
+    // Crear una subcarpeta con el creationId dentro de la carpeta de la conferencia
+    const presentationFolderPath = path.join(conferenceFolderPath, `${newCreationId}`);
+    if (!fs.existsSync(presentationFolderPath)) {
+      fs.mkdirSync(presentationFolderPath, { recursive: true });
+    }
+
+    // Paso 4: Guardar el documento general en la subcarpeta
     const generalDocument = req.files['generalDocument'] ? req.files['generalDocument'][0] : null;
 
     if (!generalDocument) {
       return res.status(400).json({ error: 'The generalDocument is required' });
     }
 
-    // Crear una subcarpeta con el nombre del presentationId
-    const uploadPath = path.join(__dirname, 'uploads', presentationId);
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
-    }
-
     // Generar la ruta del archivo dentro de la subcarpeta
-    const generalDocumentPath = path.join(uploadPath, `general-${generalDocument.originalname}`);
+    const generalDocumentPath = path.join(presentationFolderPath, `general-${generalDocument.originalname}`);
 
-    // Renombrar y mover el archivo al directorio de uploads/presentationId
+    // Renombrar y mover el archivo al directorio de uploads/conferenceId/creationId
     fs.renameSync(
       path.join(__dirname, 'uploads', generalDocument.filename),
       generalDocumentPath
@@ -2571,10 +2641,10 @@ app.post('/api/presentations', fileUpload.fields([
 
     // Guardar la ruta relativa en la base de datos
     await presentationRef.update({
-      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`
+      generalDocumentPath: `/uploads/${conferenceId}/${newCreationId}/general-${generalDocument.originalname}`
     });
 
-    // Actualizar el documento del usuario
+    // Paso 5: Actualizar el documento del usuario
     const userRef = db.collection('users').doc(userId);
     const userDoc = await userRef.get();
 
@@ -2596,17 +2666,8 @@ app.post('/api/presentations', fileUpload.fields([
       'conferences-author': updatedConferences,
     });
 
-    // Actualizar el documento de la conferencia
-    const conferenceRef = db.collection('conferences').doc(conferenceId);
-    const conferenceDoc = await conferenceRef.get();
-
-    if (!conferenceDoc.exists) {
-      return res.status(404).json({ error: 'Conference not found' });
-    }
-
-    const conferenceData = conferenceDoc.data();
+    // Paso 6: Actualizar el documento de la conferencia
     const updatedConferencePresentations = conferenceData.presentations || [];
-
     updatedConferencePresentations.push(presentationId);
 
     await conferenceRef.update({
@@ -2616,7 +2677,8 @@ app.post('/api/presentations', fileUpload.fields([
     res.status(201).json({
       message: 'Presentation created successfully',
       presentationId,
-      generalDocumentPath: `/uploads/${presentationId}/general-${generalDocument.originalname}`
+      creationId: newCreationId, // Devolver el nuevo creationId
+      generalDocumentPath: `/uploads/${conferenceId}/${newCreationId}/general-${generalDocument.originalname}`
     });
   } catch (error) {
     console.error('Error creating presentation:', error);
