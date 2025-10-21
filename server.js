@@ -1889,6 +1889,31 @@ app.get('/api/presentations/:conferenceId/:creationId/download', async (req, res
   }
 });
 
+// Endpoint to view a document by conferenceId and creationId
+app.get('/api/presentations/:conferenceId/:creationId/view', async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+
+    // Construct the file path
+    const documentFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    const files = fs.readdirSync(documentFolderPath);
+
+    // Find the general document in the folder
+    const generalDocument = files.find(file => file.startsWith('general-'));
+    if (!generalDocument) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const filePath = path.join(documentFolderPath, generalDocument);
+
+    // Send the file to the client for viewing
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error viewing document:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 //Endpoint to get a specific conference
 app.get("/api/conferences/getConference/:id", async (req, res) => {
