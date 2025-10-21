@@ -2579,6 +2579,52 @@ app.get('/api/presentations/area-title/:presentationId', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Endpoint to save a new revision form
+app.post('/api/forms', async (req, res) => {
+  try {
+    const { questions } = req.body;
+
+    if (!questions || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ error: 'Questions are required and must be an array.' });
+    }
+
+    // Prepare the form data
+    const formData = {
+      creationDate: new Date().toISOString(), // Save the creation date
+      conferenceUsed: [], // Initialize as an empty array
+    };
+
+    // Add questions to the form data
+    questions.forEach((question, index) => {
+      const questionNumber = (index + 1).toString(); // Incremental number for the question
+      const questionData = {
+        type: question.type,
+        question: question.text,
+      };
+
+      // Add options for single/multiple choice questions
+      if (question.type === 'single' || question.type === 'multiple') {
+        questionData.options = {};
+        question.options.forEach((option, optionIndex) => {
+          const optionNumber = (optionIndex + 1).toString(); // Incremental number for the option
+          questionData.options[optionNumber] = option;
+        });
+      }
+
+      formData[questionNumber] = questionData;
+    });
+
+    // Save the form in the database
+    const formRef = db.collection('forms').doc();
+    await formRef.set(formData);
+
+    res.status(201).json({ message: 'Form created successfully', formId: formRef.id });
+  } catch (error) {
+    console.error('Error creating form:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 //################################################################################################
 
 
