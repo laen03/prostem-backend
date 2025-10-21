@@ -2648,6 +2648,8 @@ app.post('/api/presentations', fileUpload.fields([
     const presentationRef = db.collection('presentations').doc();
     const presentationId = presentationRef.id;
 
+    const currentDate = new Date().toISOString();
+
     const presentationData = {
       'creator-id': userId,
       'conference-id': conferenceId,
@@ -2655,8 +2657,11 @@ app.post('/api/presentations', fileUpload.fields([
       summary,
       area, // Add the area directly as it comes
       creationId: newCreationId, // Asignar el nuevo creationId
+      paid: false, // Initialize as false
+      reviewed: false, // Initialize as false
+      createdAt: currentDate, // Set creation date
+      lastModified: currentDate, // Set lastModified to the same as createdAt
       ...otherFields, // Incluir otros campos adicionales
-      createdAt: new Date().toISOString(),
     };
 
     await presentationRef.set(presentationData);
@@ -2728,6 +2733,9 @@ app.post('/api/presentations', fileUpload.fields([
       message: 'Presentation created successfully',
       presentationId,
       creationId: newCreationId, // Devolver el nuevo creationId
+      paid: false, // Return the initial value of paid
+      reviewed: false, // Return the initial value of reviewed
+      lastModified: currentDate, // Return the lastModified date
       generalDocumentPath: `/uploads/${conferenceId}/${newCreationId}/general-${generalDocument.originalname}`
     });
   } catch (error) {
