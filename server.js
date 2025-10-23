@@ -2625,6 +2625,172 @@ app.post('/api/forms', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Endpoint to fetch all forms with conference titles
+app.get('/api/forms', async (req, res) => {
+  try {
+    const formsSnapshot = await db.collection('forms').get();
+    const forms = [];
+
+    for (const formDoc of formsSnapshot.docs) {
+      const formData = formDoc.data();
+      const formId = formDoc.id;
+
+      // Fetch conference titles for the conferenceUsed field
+      const conferenceTitles = [];
+      for (const conferenceId of formData.conferenceUsed || []) {
+        const conferenceDoc = await db.collection('conferences').doc(conferenceId).get();
+        if (conferenceDoc.exists) {
+          const conferenceData = conferenceDoc.data();
+          conferenceTitles.push(conferenceData.title || 'Unknown Title');
+        }
+      }
+
+      forms.push({
+        id: formId,
+        creationDate: formData.creationDate,
+        conferenceUsed: conferenceTitles,
+        questionCount: Object.keys(formData).filter(key => !isNaN(Number(key))).length, // Count numeric keys (questions)
+      });
+    }
+
+    res.status(200).json(forms);
+  } catch (error) {
+    console.error('Error fetching forms:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to fetch a single form by ID
+app.get('/api/forms/:id', async (req, res) => {
+  const formId = req.params.id;
+
+  if (!formId) {
+    return res.status(400).json({ error: 'Form ID is required' });
+  }
+
+  try {
+    const formDoc = await db.collection('forms').doc(formId).get();
+
+    if (!formDoc.exists) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    const formData = formDoc.data();
+    res.status(200).json({ id: formId, ...formData });
+  } catch (error) {
+    console.error('Error fetching form:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to check if a form is assigned to a conference
+app.get('/api/conferences/:conferenceId/forms/:formId/assigned', async (req, res) => {
+  const { conferenceId, formId } = req.params;
+
+  if (!conferenceId || !formId) {
+    return res.status(400).json({ error: 'Conference ID and Form ID are required' });
+  }
+
+  try {
+    const conferenceDoc = await db.collection('conferences').doc(conferenceId).get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+
+    const conferenceData = conferenceDoc.data();
+    const formAssigned = conferenceData.formAssigned || []; // Default to an empty array if the field doesn't exist
+
+    const isAssigned = formAssigned.includes(formId); // Check if the form ID is in the array
+
+    res.status(200).json({ isAssigned });
+  } catch (error) {
+    console.error('Error checking form assignment:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to check if a form is assigned to a conference
+app.get('/api/conferences/:conferenceId/forms/:formId/assigned', async (req, res) => {
+  const { conferenceId, formId } = req.params;
+
+  if (!conferenceId || !formId) {
+    return res.status(400).json({ error: 'Conference ID and Form ID are required' });
+  }
+
+  try {
+    const conferenceDoc = await db.collection('conferences').doc(conferenceId).get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+
+    const conferenceData = conferenceDoc.data();
+    const formAssigned = conferenceData.formAssigned || []; // Default to an empty array if the field doesn't exist
+
+    const isAssigned = formAssigned.includes(formId); // Check if the form ID is in the array
+
+    res.status(200).json({ isAssigned });
+  } catch (error) {
+    console.error('Error checking form assignment:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to toggle the assignment of a form to a conference
+app.patch('/api/conferences/:conferenceId/forms/:formId/toggle-assignment', async (req, res) => {
+  const { conferenceId, formId } = req.params;
+
+  if (!conferenceId || !formId) {
+    return res.status(400).json({ error: 'Conference ID and Form ID are required' });
+  }
+
+  try {
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+
+    const conferenceData = conferenceDoc.data();
+    const currentFormAssigned = conferenceData.formAssigned || null; // Get the currently assigned form
+
+    let message = '';
+    if (currentFormAssigned === formId) {
+      // If the form is already assigned, unassign it
+      await conferenceRef.update({ formAssigned: '' });
+      message = 'Form unassigned successfully';
+    } else {
+      // Assign the new form
+      await conferenceRef.update({ formAssigned: formId });
+
+      // Add the conferenceId to the "conferenceUsed" array in the forms collection
+      const formRef = db.collection('forms').doc(formId);
+      const formDoc = await formRef.get();
+
+      if (!formDoc.exists) {
+        return res.status(404).json({ error: 'Form not found' });
+      }
+
+      const formData = formDoc.data();
+      const conferenceUsed = formData.conferenceUsed || []; // Default to an empty array if the field doesn't exist
+
+      if (!conferenceUsed.includes(conferenceId)) {
+        conferenceUsed.push(conferenceId);
+        await formRef.update({ conferenceUsed });
+      }
+
+      message = 'Form assigned successfully';
+    }
+
+    res.status(200).json({ message, formAssigned: formId });
+  } catch (error) {
+    console.error('Error toggling form assignment:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 //################################################################################################
 
 
