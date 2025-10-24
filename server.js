@@ -2019,31 +2019,39 @@ app.delete("/api/conferences/presentations/:id", async (req, res) => {
   }
 })
 
-// Endpoint to create new reviewers
+// Endpoint to assign a user as a reviewer
 app.post("/api/reviewers", async (req, res) => {
   try {
-    const data = req.body;
+    const { email } = req.body; // Extract the email from the request body
 
-    // Extract the area from the request body
-    const { area, ...reviewerData } = data; // Exclude "area" from the rest of the data
-
-    if (!area) {
-      return res.status(400).json({ Error: "The 'area' field is required." });
+    if (!email) {
+      return res.status(400).json({ error: "The 'email' field is required." });
     }
 
-    // Add the area directly to the "areas" field in the reviewers collection
-    const reviewerWithAreas = {
-      ...reviewerData,
-      areas: [area], // Add the area directly as an array
-    };
+    // Check if a user with the given email exists in the "users" collection
+    const userQuery = await db.collection("users").where("email", "==", email).get();
 
-    // Create the new reviewer in the "reviewers" collection
-    const newReviewer = await db.collection("reviewers").add(reviewerWithAreas);
+    if (userQuery.empty) {
+      // If no user is found with the given email
+      return res.status(404).json({ error: "No user found with the provided email." });
+    }
 
-    // Respond with the new reviewer ID and data
-    res.status(201).json({ "New reviewer": newReviewer.id, ...reviewerWithAreas });
+    // Get the first matching user document
+    const userDoc = userQuery.docs[0];
+    const userData = userDoc.data();
+
+    if (userData.reviewer) {
+      // If the "reviewer" field is already true
+      return res.status(200).json({ message: "A reviewer already exists with this email." });
+    }
+
+    // If the "reviewer" field is false, update it to true
+    await db.collection("users").doc(userDoc.id).update({ reviewer: true });
+
+    return res.status(200).json({ message: "User successfully updated as a reviewer." });
   } catch (error) {
-    res.status(500).json({ Error: error.message });
+    console.error("Error assigning reviewer:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -2143,7 +2151,7 @@ app.patch("/api/conferences/:id/toggleActive", async (req, res) => {
   }
 });
 
-//Endpoint to toggle the assignment of a reviewer for a presentation
+// Endpoint to toggle the assignment of a reviewer for a presentation
 app.patch("/api/toggleAssignment", async (req, res) => {
   try {
     const { reviewerId, presentationId } = req.body;
@@ -2152,14 +2160,14 @@ app.patch("/api/toggleAssignment", async (req, res) => {
       return res.status(400).json({ error: "Reviewer ID and Presentation ID are required" });
     }
 
-    const reviewerRef = db.collection("reviewers").doc(reviewerId);
+    const userRef = db.collection("users").doc(reviewerId); // Query the users collection
     const presentationRef = db.collection("presentations").doc(presentationId);
 
-    // Get the current data for both reviewer and presentation
-    const reviewerDoc = await reviewerRef.get();
+    // Get the current data for both user and presentation
+    const userDoc = await userRef.get();
     const presentationDoc = await presentationRef.get();
 
-    if (!reviewerDoc.exists) {
+    if (!userDoc.exists) {
       return res.status(404).json({ error: "Reviewer not found" });
     }
 
@@ -2167,14 +2175,14 @@ app.patch("/api/toggleAssignment", async (req, res) => {
       return res.status(404).json({ error: "Presentation not found" });
     }
 
-    const reviewerData = reviewerDoc.data();
+    const userData = userDoc.data();
     const presentationData = presentationDoc.data();
 
-    const isAssigned = reviewerData.presentationsAssigned?.includes(presentationId);
+    const isAssigned = userData.presentationsAssigned?.includes(presentationId);
 
     if (isAssigned) {
       // If already assigned, remove the assignment
-      await reviewerRef.update({
+      await userRef.update({
         presentationsAssigned: admin.firestore.FieldValue.arrayRemove(presentationId),
       });
 
@@ -2185,7 +2193,7 @@ app.patch("/api/toggleAssignment", async (req, res) => {
       res.status(200).json({ message: "Assignment removed successfully" });
     } else {
       // If not assigned, add the assignment
-      await reviewerRef.update({
+      await userRef.update({
         presentationsAssigned: admin.firestore.FieldValue.arrayUnion(presentationId),
       });
 
@@ -2256,29 +2264,31 @@ app.get('/api/areas', async (req, res) => {
   }
 });
 
-//Endpoint to check if a reviewer is assigned to a presentation
+// Endpoint to check if a reviewer is assigned to a presentation
 app.get("/api/isAssigned", async (req, res) => {
+  const { reviewerId, presentationId } = req.query;
+
+  if (!reviewerId || !presentationId) {
+    return res.status(400).json({ error: "Reviewer ID and Presentation ID are required" });
+  }
+
   try {
-    const { reviewerId, presentationId } = req.query;
-
-    if (!reviewerId || !presentationId) {
-      return res.status(400).json({ error: "Reviewer ID and Presentation ID are required" });
-    }
-
-    const reviewerRef = db.collection("reviewers").doc(reviewerId);
-    const reviewerDoc = await reviewerRef.get();
+    // Get the reviewer document from the "users" collection
+    const reviewerDoc = await db.collection("users").doc(reviewerId).get();
 
     if (!reviewerDoc.exists) {
       return res.status(404).json({ error: "Reviewer not found" });
     }
 
     const reviewerData = reviewerDoc.data();
+
+    // Check if the presentationId exists in the "presentationsAssigned" array
     const isAssigned = reviewerData.presentationsAssigned?.includes(presentationId) || false;
 
     res.status(200).json({ isAssigned });
   } catch (error) {
-    console.error("Error checking assignment:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Error checking if reviewer is assigned:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -2405,56 +2415,172 @@ app.post('/api/revision-forms', async (req, res) => {
   }
 });
 
-// Endpoint to find reviewers by presentation area
+// Endpoint to find reviewers by presentation area (from the users collection)
 app.get('/api/reviewers-by-presentation/:presentationId', async (req, res) => {
-  try {
-    const { presentationId } = req.params;
+  const { presentationId } = req.params;
 
-    // Step 1: Fetch the presentation document
+  if (!presentationId) {
+    return res.status(400).json({ error: 'Presentation ID is required' });
+  }
+
+  try {
+    // Get the presentation data
     const presentationDoc = await db.collection('presentations').doc(presentationId).get();
 
     if (!presentationDoc.exists) {
-      return res.status(404).json({ error: 'Presentation not found.' });
+      console.log(`Presentation with ID ${presentationId} not found.`);
+      return res.status(404).json({ error: 'Presentation not found' });
     }
 
     const presentationData = presentationDoc.data();
-    const presentationArea = presentationData.area;
+    const presentationArea = presentationData.area; // Get the area of the presentation
 
     if (!presentationArea) {
-      return res.status(400).json({ error: 'The presentation does not have an area defined.' });
+      console.log(`Presentation with ID ${presentationId} does not have an area.`);
+      return res.status(400).json({ error: 'Presentation area is missing' });
     }
 
-    // Step 2: Fetch all reviewers
-    const reviewersSnapshot = await db.collection('reviewers').get();
-    const matchingReviewers = [];
 
-    reviewersSnapshot.forEach((reviewerDoc) => {
-      const reviewerData = reviewerDoc.data();
-      const reviewerAreas = reviewerData.areas || [];
+    // Query the users collection for reviewers with matching specializations
+    const usersQuery = await db.collection('users')
+      .where('reviewer', '==', true) // Only fetch users with reviewer set to true
+      .get();
 
-      // Check if the reviewer's areas include the presentation area
-      if (reviewerAreas.includes(presentationArea)) {
-        matchingReviewers.push({
-          id: reviewerDoc.id,
-          name: reviewerData.name || null,
-          country: reviewerData.country || null,
-          email: reviewerData.email || null,
-          institution: reviewerData.institution || null,
-          doi_orcid: reviewerData.doi_orcid || null,
-          areas: reviewerAreas,
-          presentationsAssigned: reviewerData.presentationsAssigned ? reviewerData.presentationsAssigned.length : 0,
+    if (usersQuery.empty) {
+      console.log('No reviewers found with reviewer field set to true.');
+      return res.status(404).json({ error: 'No reviewers found' });
+    }
+
+    const reviewers = [];
+
+    usersQuery.forEach((doc) => {
+      const userData = doc.data();
+
+      // Check if the user's specializations include the presentation area
+      if (userData.specializations && userData.specializations.includes(presentationArea)) {
+        reviewers.push({
+          id: doc.id,
+          name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
+          email: userData.email,
+          institution: userData.institution,
+          presentationsAssigned: userData.presentationsAssigned?.length || 0, // Count of assigned presentations
+          isAssigned: userData.conferencesAssigned?.includes(presentationData['conference-id']) || false, // Check if the user is assigned to the conference
         });
       }
     });
 
-    // Step 3: Return the matching reviewers or a message if none are found
-    if (matchingReviewers.length === 0) {
-      return res.status(404).json({ message: 'No reviewers found for the specified area.' });
+    res.status(200).json({ reviewers });
+  } catch (error) {
+    console.error('Error fetching reviewers:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to get all conferences in which the current user has presentations assigned as a reviewer
+app.get('/api/reviewer-conferences/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
+
+  try {
+    // Get the user document from the "users" collection
+    const userDoc = await db.collection('users').doc(userId).get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
-    res.status(200).json({ reviewers: matchingReviewers });
+    const userData = userDoc.data();
+
+    // Check if the user is a reviewer
+    if (!userData.reviewer) {
+      return res.status(200).json({
+        message: 'Usted no ha sido asignado como revisor de ninguna conferencia hasta el momento',
+        conferences: []
+      });
+    }
+
+    // Get the presentations assigned to the user
+    const presentationsAssigned = userData.presentationsAssigned || [];
+
+    if (presentationsAssigned.length === 0) {
+      return res.status(200).json({
+        message: 'Usted no ha sido asignado como revisor de ninguna conferencia hasta el momento',
+        conferences: []
+      });
+    }
+
+    // Fetch the conferences for the assigned presentations
+    const conferenceIds = new Set();
+    for (const presentationId of presentationsAssigned) {
+      const presentationDoc = await db.collection('presentations').doc(presentationId).get();
+
+      if (presentationDoc.exists) {
+        const presentationData = presentationDoc.data();
+        if (presentationData['conference-id']) {
+          conferenceIds.add(presentationData['conference-id']);
+        }
+      }
+    }
+
+    // Fetch the conference details
+    const conferences = [];
+    for (const conferenceId of conferenceIds) {
+      const conferenceDoc = await db.collection('conferences').doc(conferenceId).get();
+
+      if (conferenceDoc.exists) {
+        conferences.push({ id: conferenceDoc.id, ...conferenceDoc.data() });
+      }
+    }
+
+    res.status(200).json({ conferences });
   } catch (error) {
-    console.error('Error finding reviewers by presentation area:', error);
+    console.error('Error fetching reviewer conferences:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to get all presentations assigned to a reviewer for a specific conference
+app.get('/api/reviewer-presentations', async (req, res) => {
+  const { userId, conferenceId } = req.query;
+
+  if (!userId || !conferenceId) {
+    return res.status(400).json({ error: 'User ID and Conference ID are required' });
+  }
+
+  try {
+    // Get the user document from the "users" collection
+    const userDoc = await db.collection('users').doc(userId).get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const presentationsAssigned = userData.presentationsAssigned || [];
+
+    if (presentationsAssigned.length === 0) {
+      return res.status(200).json({ presentations: [] });
+    }
+
+    // Fetch presentations that match the assigned IDs and the conference ID
+    const presentations = [];
+    for (const presentationId of presentationsAssigned) {
+      const presentationDoc = await db.collection('presentations').doc(presentationId).get();
+
+      if (presentationDoc.exists) {
+        const presentationData = presentationDoc.data();
+        if (presentationData['conference-id'] === conferenceId) {
+          presentations.push({ id: presentationDoc.id, ...presentationData });
+        }
+      }
+    }
+
+    res.status(200).json({ presentations });
+  } catch (error) {
+    console.error('Error fetching reviewer presentations:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
