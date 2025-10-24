@@ -2584,6 +2584,59 @@ app.get('/api/reviewer-presentations', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Endpoint to get the form assigned to the conference of a presentation
+app.get('/api/presentations/:presentationId/form', async (req, res) => {
+  const { presentationId } = req.params;
+
+  if (!presentationId) {
+    return res.status(400).json({ error: 'Presentation ID is required' });
+  }
+
+  try {
+    // Get the presentation document
+    const presentationDoc = await db.collection('presentations').doc(presentationId).get();
+
+    if (!presentationDoc.exists) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationData = presentationDoc.data();
+    const conferenceId = presentationData['conference-id'];
+
+    if (!conferenceId) {
+      return res.status(400).json({ error: 'Conference ID is missing in the presentation' });
+    }
+
+    // Get the conference document
+    const conferenceDoc = await db.collection('conferences').doc(conferenceId).get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+
+    const conferenceData = conferenceDoc.data();
+    const formId = conferenceData.formAssigned;
+
+    if (!formId) {
+      return res.status(404).json({ error: 'No form assigned to this conference' });
+    }
+
+    // Get the form document
+    const formDoc = await db.collection('forms').doc(formId).get();
+
+    if (!formDoc.exists) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    const formData = formDoc.data();
+
+    res.status(200).json({ form: formData });
+  } catch (error) {
+    console.error('Error fetching form for presentation:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 //########################################################################
 //Reminder email section
 
