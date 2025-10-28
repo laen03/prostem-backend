@@ -2178,27 +2178,42 @@ app.patch("/api/toggleAssignment", async (req, res) => {
     const userData = userDoc.data();
     const presentationData = presentationDoc.data();
 
-    const isAssigned = userData.presentationsAssigned?.includes(presentationId);
+    // Check if the reviewer is already assigned to the presentation
+    const isAssigned = userData.presentationsAssigned?.some(
+      (assignment) => assignment.presentationId === presentationId
+    );
 
     if (isAssigned) {
       // If already assigned, remove the assignment
       await userRef.update({
-        presentationsAssigned: admin.firestore.FieldValue.arrayRemove(presentationId),
+        presentationsAssigned: admin.firestore.FieldValue.arrayRemove({
+          presentationId: presentationId,
+          reviewed: false, // Match the structure to remove
+        }),
       });
 
       await presentationRef.update({
-        reviewersAssigned: admin.firestore.FieldValue.arrayRemove(reviewerId),
+        reviewersAssigned: admin.firestore.FieldValue.arrayRemove({
+          reviewerId: reviewerId,
+          reviewed: false, // Match the structure to remove
+        }),
       });
 
       res.status(200).json({ message: "Assignment removed successfully" });
     } else {
       // If not assigned, add the assignment
       await userRef.update({
-        presentationsAssigned: admin.firestore.FieldValue.arrayUnion(presentationId),
+        presentationsAssigned: admin.firestore.FieldValue.arrayUnion({
+          presentationId: presentationId,
+          reviewed: false, // Default value
+        }),
       });
 
       await presentationRef.update({
-        reviewersAssigned: admin.firestore.FieldValue.arrayUnion(reviewerId),
+        reviewersAssigned: admin.firestore.FieldValue.arrayUnion({
+          reviewerId: reviewerId,
+          reviewed: false, // Default value
+        }),
       });
 
       res.status(200).json({ message: "Assignment added successfully" });
