@@ -3002,6 +3002,21 @@ app.post('/api/filled-forms', async (req, res) => {
       if (!answer.question || !answer.type || !answer.answer) {
         throw new Error('Invalid answer structure');
       }
+
+      // Ensure options are omitted for text questions
+      if (answer.type === 'text') {
+        return {
+          question: answer.question,
+          type: answer.type,
+          answer: answer.answer, // No options for text questions
+        };
+      }
+
+      // Ensure answer is an array for multiple questions
+      if (answer.type === 'multiple' && !Array.isArray(answer.answer)) {
+        throw new Error('Answer for multiple questions must be an array');
+      }
+
       return {
         question: answer.question,
         type: answer.type,
