@@ -2997,12 +2997,25 @@ app.post('/api/filled-forms', async (req, res) => {
       return res.status(400).json({ error: 'Form ID, User ID, and answers are required' });
     }
 
+    // Validate the structure of each answer
+    const formattedAnswers = answers.map((answer) => {
+      if (!answer.question || !answer.type || !answer.answer) {
+        throw new Error('Invalid answer structure');
+      }
+      return {
+        question: answer.question,
+        type: answer.type,
+        options: answer.options || {}, // Include options if available
+        answer: answer.answer,
+      };
+    });
+
     // Prepare the document structure
     const filledForm = {
       creationDate: admin.firestore.FieldValue.serverTimestamp(),
       formId,
       userId,
-      answers, // The answers will be sent from the frontend
+      answers: formattedAnswers, // Save the formatted answers
     };
 
     // Save the filled form in the "filled-forms" collection
@@ -3014,7 +3027,6 @@ app.post('/api/filled-forms', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
 //################################################################################################
 
 
