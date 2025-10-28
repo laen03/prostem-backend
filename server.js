@@ -2646,7 +2646,8 @@ app.get('/api/presentations/:presentationId/form', async (req, res) => {
 
     const formData = formDoc.data();
 
-    res.status(200).json({ form: formData });
+    // Include the formId in the response
+    res.status(200).json({ formId, ...formData });
   } catch (error) {
     console.error('Error fetching form for presentation:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -2985,6 +2986,35 @@ app.patch('/api/conferences/:conferenceId/forms/:formId/toggle-assignment', asyn
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+
+// Endpoint to save filled form
+app.post('/api/filled-forms', async (req, res) => {
+  try {
+    const { formId, userId, answers } = req.body;
+
+    if (!formId || !userId || !answers) {
+      return res.status(400).json({ error: 'Form ID, User ID, and answers are required' });
+    }
+
+    // Prepare the document structure
+    const filledForm = {
+      creationDate: admin.firestore.FieldValue.serverTimestamp(),
+      formId,
+      userId,
+      answers, // The answers will be sent from the frontend
+    };
+
+    // Save the filled form in the "filled-forms" collection
+    const filledFormRef = await db.collection('filled-forms').add(filledForm);
+
+    res.status(201).json({ message: 'Form saved successfully', id: filledFormRef.id });
+  } catch (error) {
+    console.error('Error saving filled form:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 //################################################################################################
 
 
