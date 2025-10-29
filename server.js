@@ -2991,10 +2991,10 @@ app.patch('/api/conferences/:conferenceId/forms/:formId/toggle-assignment', asyn
 // Endpoint to save filled form
 app.post('/api/filled-forms', async (req, res) => {
   try {
-    const { formId, userId, answers } = req.body;
+    const { formId, presentationId, reviewerId, answers } = req.body;
 
-    if (!formId || !userId || !answers) {
-      return res.status(400).json({ error: 'Form ID, User ID, and answers are required' });
+    if (!formId || !presentationId || !reviewerId || !answers) {
+      return res.status(400).json({ error: 'Form ID, User ID, Presentation ID, Reviewer ID, and answers are required' });
     }
 
     // Validate the structure of each answer
@@ -3003,16 +3003,14 @@ app.post('/api/filled-forms', async (req, res) => {
         throw new Error('Invalid answer structure');
       }
 
-      // Ensure options are omitted for text questions
       if (answer.type === 'text') {
         return {
           question: answer.question,
           type: answer.type,
-          answer: answer.answer, // No options for text questions
+          answer: answer.answer,
         };
       }
 
-      // Ensure answer is an array for multiple questions
       if (answer.type === 'multiple' && !Array.isArray(answer.answer)) {
         throw new Error('Answer for multiple questions must be an array');
       }
@@ -3020,7 +3018,7 @@ app.post('/api/filled-forms', async (req, res) => {
       return {
         question: answer.question,
         type: answer.type,
-        options: answer.options || {}, // Include options if available
+        options: answer.options || {},
         answer: answer.answer,
       };
     });
@@ -3029,8 +3027,9 @@ app.post('/api/filled-forms', async (req, res) => {
     const filledForm = {
       creationDate: admin.firestore.FieldValue.serverTimestamp(),
       formId,
-      userId,
-      answers: formattedAnswers, // Save the formatted answers
+      presentationId,
+      reviewerId, // Save the reviewer ID
+      answers: formattedAnswers,
     };
 
     // Save the filled form in the "filled-forms" collection
