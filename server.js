@@ -2529,7 +2529,9 @@ app.get('/api/reviewer-conferences/:userId', async (req, res) => {
 
     // Fetch the conferences for the assigned presentations
     const conferenceIds = new Set();
-    for (const presentationId of presentationsAssigned) {
+    for (const assignment of presentationsAssigned) {
+      const { presentationId } = assignment; // Extract presentationId from the map
+
       const presentationDoc = await db.collection('presentations').doc(presentationId).get();
 
       if (presentationDoc.exists) {
@@ -2582,7 +2584,9 @@ app.get('/api/reviewer-presentations', async (req, res) => {
 
     // Fetch presentations that match the assigned IDs and the conference ID
     const presentations = [];
-    for (const presentationId of presentationsAssigned) {
+    for (const assignment of presentationsAssigned) {
+      const { presentationId } = assignment; // Extract presentationId from the map
+
       const presentationDoc = await db.collection('presentations').doc(presentationId).get();
 
       if (presentationDoc.exists) {
@@ -2994,7 +2998,7 @@ app.post('/api/filled-forms', async (req, res) => {
     const { formId, presentationId, reviewerId, answers } = req.body;
 
     if (!formId || !presentationId || !reviewerId || !answers) {
-      return res.status(400).json({ error: 'Form ID, User ID, Presentation ID, Reviewer ID, and answers are required' });
+      return res.status(400).json({ error: 'Form ID, Presentation ID, Reviewer ID, and answers are required' });
     }
 
     // Validate the structure of each answer
@@ -3035,7 +3039,51 @@ app.post('/api/filled-forms', async (req, res) => {
     // Save the filled form in the "filled-forms" collection
     const filledFormRef = await db.collection('filled-forms').add(filledForm);
 
-    res.status(201).json({ message: 'Form saved successfully', id: filledFormRef.id });
+    // Update the "reviewed" field in the "reviewersAssigned" array of the presentation
+    const presentationRef = db.collection('presentations').doc(presentationId);
+    const presentationDoc = await presentationRef.get();
+
+    if (!presentationDoc.exists) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationData = presentationDoc.data();
+    const reviewersAssigned = presentationData.reviewersAssigned || [];
+
+    // Find the reviewer and update the "reviewed" field
+    const updatedReviewersAssigned = reviewersAssigned.map((reviewer) => {
+      if (reviewer.reviewerId === reviewerId) {
+        return { ...reviewer, reviewed: true }; // Set "reviewed" to true
+      }
+      return reviewer;
+    });
+
+    // Update the presentation document
+    await presentationRef.update({ reviewersAssigned: updatedReviewersAssigned });
+
+    // Update the "reviewed" field in the "presentationsAssigned" array of the user
+    const userRef = db.collection('users').doc(reviewerId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'Reviewer not found' });
+    }
+
+    const userData = userDoc.data();
+    const presentationsAssigned = userData.presentationsAssigned || [];
+
+    // Find the presentation and update the "reviewed" field
+    const updatedPresentationsAssigned = presentationsAssigned.map((assignment) => {
+      if (assignment.presentationId === presentationId) {
+        return { ...assignment, reviewed: true }; // Set "reviewed" to true
+      }
+      return assignment;
+    });
+
+    // Update the user document
+    await userRef.update({ presentationsAssigned: updatedPresentationsAssigned });
+
+    res.status(201).json({ message: 'Form saved successfully, reviewer updated, and user updated', id: filledFormRef.id });
   } catch (error) {
     console.error('Error saving filled form:', error);
     res.status(500).json({ error: 'Internal server error' });
