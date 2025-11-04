@@ -1813,7 +1813,10 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
       return res.status(404).json({ error: "Conference not found" });
     }
 
-    const currentResultsSent = conferenceDoc.get("resultsSent") || 0;
+    const conferenceData = conferenceDoc.data();
+    const conferenceTitle = conferenceData.title; // Get the conference title
+
+    const currentResultsSent = conferenceData.resultsSent || 0;
 
     // Increment the resultsSent field, but cap it at 3
     const updatedResultsSent = Math.min(currentResultsSent + 1, 3);
@@ -1822,7 +1825,7 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
     await conferenceRef.update({ resultsSent: updatedResultsSent });
 
     // Process presentations and send emails
-    const presentations = conferenceDoc.get("presentations") || [];
+    const presentations = conferenceData.presentations || [];
     for (const presentationId of presentations) {
       const presentationRef = db.collection("presentations").doc(presentationId);
       const presentationDoc = await presentationRef.get();
@@ -1833,6 +1836,7 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
       }
 
       const presentationData = presentationDoc.data();
+      const presentationTitle = presentationData.title; // Get the presentation title
       const reviewersAssigned = presentationData.reviewersAssigned || [];
       const creatorId = presentationData["creator-id"];
 
@@ -1869,7 +1873,8 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
         emailBody = `
           Estimado usuario,
           
-          Su ponencia ha sido aceptada. Por favor, regrese al sitio web para subir el documento completo, incluyendo los autores.
+          Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada. 
+          Por favor, regrese al sitio web para subir el documento completo, incluyendo los autores.
           
           Atentamente,
           El equipo de la conferencia
@@ -1878,7 +1883,7 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
         emailBody = `
           Estimado usuario,
           
-          Lamentamos informarle que su ponencia no ha sido aceptada.
+          Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" no fue aceptada.
           
           Atentamente,
           El equipo de la conferencia
@@ -1887,7 +1892,8 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
         emailBody = `
           Estimado usuario,
           
-          Su ponencia ha sido aceptada con cambios requeridos. Por favor, regrese al sitio web para revisar los comentarios y realizar los cambios necesarios.
+          Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada con cambios requeridos. 
+          Por favor, regrese al sitio web para revisar los comentarios y realizar los cambios necesarios.
           
           Atentamente,
           El equipo de la conferencia
@@ -3133,22 +3139,22 @@ app.post('/api/filled-forms', async (req, res) => {
     }
 
     // Validate the structure of each answer
-  const formattedAnswers = answers.map((answer) => {
-    if (!answer.question || !answer.type || !answer.answer) {
-      throw new Error('Invalid answer structure');
-    }
+    const formattedAnswers = answers.map((answer) => {
+      if (!answer.question || !answer.type || !answer.answer) {
+        throw new Error('Invalid answer structure');
+      }
 
-  if (answer.type === 'text') {
-    return {
-      question: answer.question,
-      type: answer.type,
-      answer: answer.answer,
-    };
-  }
+      if (answer.type === 'text') {
+        return {
+          question: answer.question,
+          type: answer.type,
+          answer: answer.answer,
+        };
+      }
 
-  if (answer.type === 'multiple' && !Array.isArray(answer.answer)) {
-    throw new Error('Answer for multiple questions must be an array');
-  }
+      if (answer.type === 'multiple' && !Array.isArray(answer.answer)) {
+        throw new Error('Answer for multiple questions must be an array');
+      }
 
       // Handle the final score question with required changes
       if (answer.question === '¿Cómo califica esta ponencia?' && answer.answer === 'Aceptada con cambios requeridos') {
@@ -3181,7 +3187,13 @@ app.post('/api/filled-forms', async (req, res) => {
     // Save the filled form in the "filled-forms" collection
     const filledFormRef = await db.collection('filled-forms').add(filledForm);
 
-    // Update the "reviewed" field in the "reviewersAssigned" array of the presentation
+    // Extract the final score from the answers
+    const finalScoreAnswer = answers.find(
+      (answer) => answer.question === '¿Cómo califica esta ponencia?'
+    );
+    const reviewerState = finalScoreAnswer ? finalScoreAnswer.answer : null;
+
+    // Update the "reviewed" field and "state" in the "reviewersAssigned" array of the presentation
     const presentationRef = db.collection('presentations').doc(presentationId);
     const presentationDoc = await presentationRef.get();
 
@@ -3192,10 +3204,9 @@ app.post('/api/filled-forms', async (req, res) => {
     const presentationData = presentationDoc.data();
     const reviewersAssigned = presentationData.reviewersAssigned || [];
 
-    // Find the reviewer and update the "reviewed" field
     const updatedReviewersAssigned = reviewersAssigned.map((reviewer) => {
       if (reviewer.reviewerId === reviewerId) {
-        return { ...reviewer, reviewed: true }; // Set "reviewed" to true
+        return { ...reviewer, reviewed: true, state: reviewerState }; // Update "reviewed" and "state"
       }
       return reviewer;
     });
@@ -3203,7 +3214,70 @@ app.post('/api/filled-forms', async (req, res) => {
     // Update the presentation document
     await presentationRef.update({ reviewersAssigned: updatedReviewersAssigned });
 
-    // Update the "reviewed" field in the "presentationsAssigned" array of the user
+    // Check if all reviewers have reviewed the presentation
+    const allReviewed = updatedReviewersAssigned.every((reviewer) => reviewer.reviewed === true);
+
+    if (allReviewed) {
+      // Count the states
+      const stateCounts = updatedReviewersAssigned.reduce((counts, reviewer) => {
+        const state = reviewer.state;
+        if (state) {
+          counts[state] = (counts[state] || 0) + 1;
+        }
+        return counts;
+      }, {});
+
+      // Check for a draw
+      const states = Object.keys(stateCounts);
+      const maxCount = Math.max(...Object.values(stateCounts));
+      const draw = states.filter((state) => stateCounts[state] === maxCount).length > 1;
+
+      if (draw) {
+        // Fetch the conference ID from the presentation
+        const conferenceId = presentationData['conference-id'];
+        if (!conferenceId) {
+          return res.status(404).json({ error: 'Conference ID not found in presentation' });
+        }
+
+        // Fetch the conference document to get the manager's email
+        const conferenceRef = db.collection('conferences').doc(conferenceId);
+        const conferenceDoc = await conferenceRef.get();
+
+        if (!conferenceDoc.exists) {
+          return res.status(404).json({ error: 'Conference not found' });
+        }
+
+        const conferenceData = conferenceDoc.data();
+        const conferenceTitle = conferenceData.title;
+        const managerId = conferenceData.managerId;
+
+        // Fetch the manager's email
+        const managerRef = db.collection('users').doc(managerId);
+        const managerDoc = await managerRef.get();
+
+        if (!managerDoc.exists) {
+          return res.status(404).json({ error: 'Conference manager not found' });
+        }
+
+        const managerEmail = managerDoc.get('email');
+
+        // Send email to the conference manager
+        const emailSubject = 'Empate en los resultados de la revisión';
+        const emailBody = `
+          Estimado usuario,
+
+          La ponencia "${presentationData.title}" de la conferencia "${conferenceTitle}" fue revisada por los revisores que usted le asignó (${reviewersAssigned.length} revisores). 
+          Sin embargo, hay un empate en los resultados de las revisiones, por lo que se le solicita ingresar a la plataforma y agregar un revisor más para desempatar el resultado.
+
+          Atentamente,
+          El equipo de la conferencia
+        `;
+
+        await sendEmail(managerEmail, emailSubject, emailBody);
+      }
+    }
+
+    // Update the "reviewed" field and "state" in the "presentationsAssigned" array of the user
     const userRef = db.collection('users').doc(reviewerId);
     const userDoc = await userRef.get();
 
@@ -3214,10 +3288,9 @@ app.post('/api/filled-forms', async (req, res) => {
     const userData = userDoc.data();
     const presentationsAssigned = userData.presentationsAssigned || [];
 
-    // Find the presentation and update the "reviewed" field
     const updatedPresentationsAssigned = presentationsAssigned.map((assignment) => {
       if (assignment.presentationId === presentationId) {
-        return { ...assignment, reviewed: true }; // Set "reviewed" to true
+        return { ...assignment, reviewed: true, state: reviewerState }; // Update "reviewed" and "state"
       }
       return assignment;
     });
