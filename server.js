@@ -1804,29 +1804,37 @@ app.get("/api/conferences/:id", async (req, res) => {
 app.patch("/api/conferences/:id/update-results", async (req, res) => {
   try {
     const conferenceId = req.params.id;
+    console.log(`Updating resultsSent for conference: ${conferenceId}`);
 
     // Fetch the conference document
     const conferenceRef = db.collection("conferences").doc(conferenceId);
     const conferenceDoc = await conferenceRef.get();
 
     if (!conferenceDoc.exists) {
+      console.error(`Conference ${conferenceId} not found`);
       return res.status(404).json({ error: "Conference not found" });
     }
 
     const conferenceData = conferenceDoc.data();
     const conferenceTitle = conferenceData.title; // Get the conference title
+    console.log(`Conference title: ${conferenceTitle}`);
 
     const currentResultsSent = conferenceData.resultsSent || 0;
+    console.log(`Current resultsSent: ${currentResultsSent}`);
 
     // Increment the resultsSent field, but cap it at 3
     const updatedResultsSent = Math.min(currentResultsSent + 1, 3);
 
     // Update the resultsSent field in the database
     await conferenceRef.update({ resultsSent: updatedResultsSent });
+    console.log(`Updated resultsSent to: ${updatedResultsSent}`);
 
     // Process presentations and send emails
     const presentations = conferenceData.presentations || [];
+    console.log(`Processing ${presentations.length} presentations`);
+
     for (const presentationId of presentations) {
+      console.log(`Processing presentation: ${presentationId}`);
       const presentationRef = db.collection("presentations").doc(presentationId);
       const presentationDoc = await presentationRef.get();
 
@@ -1837,8 +1845,11 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
 
       const presentationData = presentationDoc.data();
       const presentationTitle = presentationData.title; // Get the presentation title
+      console.log(`Presentation title: ${presentationTitle}`);
+
       const reviewersAssigned = presentationData.reviewersAssigned || [];
       const creatorId = presentationData["creator-id"];
+      console.log(`Creator ID: ${creatorId}`);
 
       // Count the states
       const stateCounts = { Aceptada: 0, "Aceptada con cambios requeridos": 0, "No Aceptada": 0 };
@@ -1848,60 +1859,36 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
           stateCounts[state]++;
         }
       }
+      console.log(`State counts: ${JSON.stringify(stateCounts)}`);
 
       // Determine the majority state
       const resultState = Object.keys(stateCounts).reduce((a, b) =>
         stateCounts[a] > stateCounts[b] ? a : b
       );
+      console.log(`Result state: ${resultState}`);
 
-      // Fetch the creator's email
-      const creatorRef = db.collection("users").doc(creatorId);
-      const creatorDoc = await creatorRef.get();
+      // Handle results based on resultsSent
+      if (currentResultsSent === 0) {
+        // Add the overallResult field to the presentation
+        await presentationRef.update({ overallResult: resultState });
+        console.log(`Added overallResult: ${resultState} to presentation: ${presentationId}`);
 
-      if (!creatorDoc.exists) {
-        console.error(`Creator ${creatorId} not found`);
+        // Send email to the user
+        await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle);
+      } else if (currentResultsSent === 1) {
+        // Check the overallResult field
+        const overallResult = presentationData.overallResult;
+        console.log(`Overall result: ${overallResult}`);
+
+        if (overallResult === "Aceptada con cambios requeridos") {
+          // Recalculate the result and send an email
+          await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle);
+        }
+      } else if (currentResultsSent === 2) {
+        // Do nothing for resultsSent = 2
+        console.log(`No action for resultsSent = 2`);
         continue;
       }
-
-      const creatorEmail = creatorDoc.get("email");
-
-      // Send email based on the result
-      let emailSubject = "Resultado de la revisión de su ponencia";
-      let emailBody = "";
-
-      if (resultState === "Aceptada") {
-        emailBody = `
-          Estimado usuario,
-          
-          Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada. 
-          Por favor, regrese al sitio web para subir el documento completo, incluyendo los autores.
-          
-          Atentamente,
-          El equipo de la conferencia
-        `;
-      } else if (resultState === "No Aceptada") {
-        emailBody = `
-          Estimado usuario,
-          
-          Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" no fue aceptada.
-          
-          Atentamente,
-          El equipo de la conferencia
-        `;
-      } else if (resultState === "Aceptada con cambios requeridos") {
-        emailBody = `
-          Estimado usuario,
-          
-          Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada con cambios requeridos. 
-          Por favor, regrese al sitio web para revisar los comentarios y realizar los cambios necesarios.
-          
-          Atentamente,
-          El equipo de la conferencia
-        `;
-      }
-
-      // Reuse the sendEmail function
-      await sendEmail(creatorEmail, emailSubject, emailBody);
     }
 
     res.status(200).json({ message: "Results updated successfully", resultsSent: updatedResultsSent });
@@ -1911,18 +1898,73 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
   }
 });
 
+// Helper function to send result emails
+async function sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle) {
+  // Fetch the creator's email
+  const creatorRef = db.collection("users").doc(creatorId);
+  const creatorDoc = await creatorRef.get();
+
+  if (!creatorDoc.exists) {
+    console.error(`Creator ${creatorId} not found`);
+    return;
+  }
+
+  const creatorEmail = creatorDoc.get("email");
+
+  // Send email based on the result
+  let emailSubject = "Resultado de la revisión de su ponencia";
+  let emailBody = "";
+
+  if (resultState === "Aceptada") {
+    emailBody = `
+      Estimado usuario,
+      
+      Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada. 
+      Por favor, regrese al sitio web para subir el documento completo, incluyendo los autores.
+      
+      Atentamente,
+      El equipo de la conferencia
+    `;
+  } else if (resultState === "No Aceptada") {
+    emailBody = `
+      Estimado usuario,
+      
+      Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" no fue aceptada.
+      
+      Atentamente,
+      El equipo de la conferencia
+    `;
+  } else if (resultState === "Aceptada con cambios requeridos") {
+    emailBody = `
+      Estimado usuario,
+      
+      Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada con cambios requeridos. 
+      Por favor, regrese al sitio web para revisar los comentarios y realizar los cambios necesarios.
+      
+      Atentamente,
+      El equipo de la conferencia
+    `;
+  }
+
+  await sendEmail(creatorEmail, emailSubject, emailBody);
+}
+
 // Helper function to send emails using the existing transporter
-async function sendEmail(to, subject, text) {
+async function sendEmail(to, subject, body) {
   try {
-    const info = await transporter.sendMail({
-      from: "prostem.itcr@gmail.com", // Reuse the configured sender email
-      to,
-      subject,
-      text,
-    });
-    console.log(`Email sent to ${to}: ${info.response}`);
+    // Define the email options
+    const mailOptions = {
+      from: `"ProSTEM" <prostem.itcr@gmail.com>`, // Use the existing email
+      to, // Recipient email
+      subject, // Subject line
+      text: body, // Plain text body
+    };
+
+    // Send the email using the existing transporter
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`Email sent: ${info.messageId}`);
   } catch (error) {
-    console.error(`Error sending email to ${to}:`, error);
+    console.error("Error sending email:", error);
   }
 }
 
