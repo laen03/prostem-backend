@@ -1751,8 +1751,9 @@ app.post("/api/conferences/:id", async (req, res) => {
       ...data,
       managerId: managerId,
       creationId: newCreationId, // Assign the calculated creationId
-      resultsSent: 0,
-      finalResults: false
+      resultsSent: 0,            // Updated field name
+      finalResults: false,
+      presentations: []
     };
 
     const newConference = await conferencesDB.add(newConferenceData);
@@ -1796,6 +1797,34 @@ app.get("/api/conferences/:id", async (req, res) => {
     res.status(201).json(userConferences);
   } catch (error) {
     res.status(500).json({ "error": error.message });
+  }
+});
+
+// Endpoint to update the resultsSent field for a specific conference
+app.patch("/api/conferences/:id/update-results", async (req, res) => {
+  try {
+    const conferenceId = req.params.id;
+
+    // Fetch the conference document
+    const conferenceRef = db.collection("conferences").doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: "Conference not found" });
+    }
+
+    const currentResultsSent = conferenceDoc.get("resultsSent") || 0;
+
+    // Increment the resultsSent field, but cap it at 3
+    const updatedResultsSent = Math.min(currentResultsSent + 1, 3);
+
+    // Update the resultsSent field in the database
+    await conferenceRef.update({ resultsSent: updatedResultsSent });
+
+    res.status(200).json({ message: "Results updated successfully", resultsSent: updatedResultsSent });
+  } catch (error) {
+    console.error("Error updating resultsSent:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
