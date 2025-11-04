@@ -1821,12 +1821,104 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
     // Update the resultsSent field in the database
     await conferenceRef.update({ resultsSent: updatedResultsSent });
 
+    // Process presentations and send emails
+    const presentations = conferenceDoc.get("presentations") || [];
+    for (const presentationId of presentations) {
+      const presentationRef = db.collection("presentations").doc(presentationId);
+      const presentationDoc = await presentationRef.get();
+
+      if (!presentationDoc.exists) {
+        console.error(`Presentation ${presentationId} not found`);
+        continue;
+      }
+
+      const presentationData = presentationDoc.data();
+      const reviewersAssigned = presentationData.reviewersAssigned || [];
+      const creatorId = presentationData["creator-id"];
+
+      // Count the states
+      const stateCounts = { Aceptada: 0, "Aceptada con cambios requeridos": 0, "No Aceptada": 0 };
+      for (const reviewer of reviewersAssigned) {
+        const state = reviewer.state;
+        if (stateCounts[state] !== undefined) {
+          stateCounts[state]++;
+        }
+      }
+
+      // Determine the majority state
+      const resultState = Object.keys(stateCounts).reduce((a, b) =>
+        stateCounts[a] > stateCounts[b] ? a : b
+      );
+
+      // Fetch the creator's email
+      const creatorRef = db.collection("users").doc(creatorId);
+      const creatorDoc = await creatorRef.get();
+
+      if (!creatorDoc.exists) {
+        console.error(`Creator ${creatorId} not found`);
+        continue;
+      }
+
+      const creatorEmail = creatorDoc.get("email");
+
+      // Send email based on the result
+      let emailSubject = "Resultado de la revisión de su ponencia";
+      let emailBody = "";
+
+      if (resultState === "Aceptada") {
+        emailBody = `
+          Estimado usuario,
+          
+          Su ponencia ha sido aceptada. Por favor, regrese al sitio web para subir el documento completo, incluyendo los autores.
+          
+          Atentamente,
+          El equipo de la conferencia
+        `;
+      } else if (resultState === "No Aceptada") {
+        emailBody = `
+          Estimado usuario,
+          
+          Lamentamos informarle que su ponencia no ha sido aceptada.
+          
+          Atentamente,
+          El equipo de la conferencia
+        `;
+      } else if (resultState === "Aceptada con cambios requeridos") {
+        emailBody = `
+          Estimado usuario,
+          
+          Su ponencia ha sido aceptada con cambios requeridos. Por favor, regrese al sitio web para revisar los comentarios y realizar los cambios necesarios.
+          
+          Atentamente,
+          El equipo de la conferencia
+        `;
+      }
+
+      // Reuse the sendEmail function
+      await sendEmail(creatorEmail, emailSubject, emailBody);
+    }
+
     res.status(200).json({ message: "Results updated successfully", resultsSent: updatedResultsSent });
   } catch (error) {
     console.error("Error updating resultsSent:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// Helper function to send emails using the existing transporter
+async function sendEmail(to, subject, text) {
+  try {
+    const info = await transporter.sendMail({
+      from: "prostem.itcr@gmail.com", // Reuse the configured sender email
+      to,
+      subject,
+      text,
+    });
+    console.log(`Email sent to ${to}: ${info.response}`);
+  } catch (error) {
+    console.error(`Error sending email to ${to}:`, error);
+  }
+}
 
 //Endpoint to modify a conference
 app.put("/api/conferences/:id", async (req, res) => {
