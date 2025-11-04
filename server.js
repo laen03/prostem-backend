@@ -1751,6 +1751,8 @@ app.post("/api/conferences/:id", async (req, res) => {
       ...data,
       managerId: managerId,
       creationId: newCreationId, // Assign the calculated creationId
+      resultsSent: 0,
+      finalResults: false
     };
 
     const newConference = await conferencesDB.add(newConferenceData);
@@ -2288,7 +2290,6 @@ app.get("/api/isAssigned", async (req, res) => {
   }
 
   try {
-    // Get the reviewer document from the "users" collection
     const reviewerDoc = await db.collection("users").doc(reviewerId).get();
 
     if (!reviewerDoc.exists) {
@@ -2296,9 +2297,14 @@ app.get("/api/isAssigned", async (req, res) => {
     }
 
     const reviewerData = reviewerDoc.data();
+    const assignments = reviewerData.presentationsAssigned || [];
 
-    // Check if the presentationId exists in the "presentationsAssigned" array
-    const isAssigned = reviewerData.presentationsAssigned?.includes(presentationId) || false;
+    // Support array of strings and array of maps { presentationId, reviewed }
+    const isAssigned = assignments.some((item) =>
+      typeof item === 'string'
+        ? item === presentationId
+        : item?.presentationId === presentationId
+    );
 
     res.status(200).json({ isAssigned });
   } catch (error) {
@@ -2585,14 +2591,18 @@ app.get('/api/reviewer-presentations', async (req, res) => {
     // Fetch presentations that match the assigned IDs and the conference ID
     const presentations = [];
     for (const assignment of presentationsAssigned) {
-      const { presentationId } = assignment; // Extract presentationId from the map
+      const { presentationId, reviewed } = assignment; // Extract presentationId and reviewed from the map
 
       const presentationDoc = await db.collection('presentations').doc(presentationId).get();
 
       if (presentationDoc.exists) {
         const presentationData = presentationDoc.data();
         if (presentationData['conference-id'] === conferenceId) {
-          presentations.push({ id: presentationDoc.id, ...presentationData });
+          presentations.push({
+            id: presentationDoc.id,
+            ...presentationData,
+            estado: reviewed ? 'Revisado' : 'Pendiente a revisar', // Add "Estado" based on the "reviewed" field
+          });
         }
       }
     }
@@ -3002,21 +3012,32 @@ app.post('/api/filled-forms', async (req, res) => {
     }
 
     // Validate the structure of each answer
-    const formattedAnswers = answers.map((answer) => {
-      if (!answer.question || !answer.type || !answer.answer) {
-        throw new Error('Invalid answer structure');
-      }
+  const formattedAnswers = answers.map((answer) => {
+    if (!answer.question || !answer.type || !answer.answer) {
+      throw new Error('Invalid answer structure');
+    }
 
-      if (answer.type === 'text') {
+  if (answer.type === 'text') {
+    return {
+      question: answer.question,
+      type: answer.type,
+      answer: answer.answer,
+    };
+  }
+
+  if (answer.type === 'multiple' && !Array.isArray(answer.answer)) {
+    throw new Error('Answer for multiple questions must be an array');
+  }
+
+      // Handle the final score question with required changes
+      if (answer.question === '¿Cómo califica esta ponencia?' && answer.answer === 'Aceptada con cambios requeridos') {
         return {
           question: answer.question,
           type: answer.type,
+          options: answer.options || {},
           answer: answer.answer,
+          requiredChanges: answer.requiredChanges || '', // Include required changes if provided
         };
-      }
-
-      if (answer.type === 'multiple' && !Array.isArray(answer.answer)) {
-        throw new Error('Answer for multiple questions must be an array');
       }
 
       return {
