@@ -1874,7 +1874,7 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
         console.log(`Added overallResult: ${resultState} to presentation: ${presentationId}`);
 
         // Send email to the user
-        await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle);
+        await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned);
       } else if (currentResultsSent === 1) {
         // Check the overallResult field
         const overallResult = presentationData.overallResult;
@@ -1882,7 +1882,7 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
 
         if (overallResult === "Aceptada con cambios requeridos") {
           // Recalculate the result and send an email
-          await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle);
+          await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned);
         }
       } else if (currentResultsSent === 2) {
         // Do nothing for resultsSent = 2
@@ -1899,7 +1899,7 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
 });
 
 // Helper function to send result emails
-async function sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle) {
+async function sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned) {
   // Fetch the creator's email
   const creatorRef = db.collection("users").doc(creatorId);
   const creatorDoc = await creatorRef.get();
@@ -1935,11 +1935,37 @@ async function sendResultEmail(resultState, creatorId, presentationTitle, confer
       El equipo de la conferencia
     `;
   } else if (resultState === "Aceptada con cambios requeridos") {
+    // Collect required changes from reviewers
+    let requiredChangesList = [];
+    for (const reviewer of reviewersAssigned) {
+      if (reviewer.state === "Aceptada con cambios requeridos") {
+        const filledFormId = reviewer["filled-form-id"];
+        const filledFormRef = db.collection("filled-forms").doc(filledFormId);
+        const filledFormDoc = await filledFormRef.get();
+
+        if (filledFormDoc.exists) {
+          const filledFormData = filledFormDoc.data();
+          const answers = filledFormData.answers || [];
+          const lastAnswer = answers[answers.length - 1]; // Get the last question
+          if (lastAnswer && lastAnswer.requiredChanges) {
+            requiredChangesList.push(lastAnswer.requiredChanges);
+          }
+        }
+      }
+    }
+
+    // Include required changes in the email
+    const requiredChangesText = requiredChangesList.length > 0
+      ? `Los siguientes cambios son requeridos:\n- ${requiredChangesList.join("\n- ")}`
+      : "No se especificaron cambios requeridos.";
+
     emailBody = `
       Estimado usuario,
       
       Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada con cambios requeridos. 
       Por favor, regrese al sitio web para revisar los comentarios y realizar los cambios necesarios.
+
+      ${requiredChangesText}
       
       Atentamente,
       El equipo de la conferencia
@@ -3235,7 +3261,7 @@ app.post('/api/filled-forms', async (req, res) => {
     );
     const reviewerState = finalScoreAnswer ? finalScoreAnswer.answer : null;
 
-    // Update the "reviewed" field and "state" in the "reviewersAssigned" array of the presentation
+    // Update the "reviewed" field, "state", and "filled-form-id" in the "reviewersAssigned" array of the presentation
     const presentationRef = db.collection('presentations').doc(presentationId);
     const presentationDoc = await presentationRef.get();
 
@@ -3248,7 +3274,7 @@ app.post('/api/filled-forms', async (req, res) => {
 
     const updatedReviewersAssigned = reviewersAssigned.map((reviewer) => {
       if (reviewer.reviewerId === reviewerId) {
-        return { ...reviewer, reviewed: true, state: reviewerState }; // Update "reviewed" and "state"
+        return { ...reviewer, reviewed: true, state: reviewerState, "filled-form-id": filledFormRef.id }; // Update "reviewed", "state", and "filled-form-id"
       }
       return reviewer;
     });
@@ -3319,7 +3345,7 @@ app.post('/api/filled-forms', async (req, res) => {
       }
     }
 
-    // Update the "reviewed" field and "state" in the "presentationsAssigned" array of the user
+    // Update the "reviewed" field, "state", and "filled-form-id" in the "presentationsAssigned" array of the user
     const userRef = db.collection('users').doc(reviewerId);
     const userDoc = await userRef.get();
 
@@ -3332,7 +3358,7 @@ app.post('/api/filled-forms', async (req, res) => {
 
     const updatedPresentationsAssigned = presentationsAssigned.map((assignment) => {
       if (assignment.presentationId === presentationId) {
-        return { ...assignment, reviewed: true, state: reviewerState }; // Update "reviewed" and "state"
+        return { ...assignment, reviewed: true, state: reviewerState, "filled-form-id": filledFormRef.id }; // Update "reviewed", "state", and "filled-form-id"
       }
       return assignment;
     });
