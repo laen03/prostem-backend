@@ -2530,30 +2530,43 @@ app.get('/api/user-conferences/:userId', async (req, res) => {
     const userData = userDoc.data();
     const presentationsAuthor = userData['presentations-author'] || [];
 
-    // Get all unique conference IDs from the user's presentations
-    const conferenceIds = new Set();
-    for (const presentationId of presentationsAuthor) {
-      const presentationRef = db.collection('presentations').doc(presentationId);
-      const presentationDoc = await presentationRef.get();
+    if (presentationsAuthor.length === 0) {
+      return res.status(200).json([]); // No presentations, return an empty array
+    }
 
-      if (presentationDoc.exists) {
-        const presentationData = presentationDoc.data();
+    // Fetch all presentations in parallel
+    const presentationDocs = await Promise.all(
+      presentationsAuthor.map((presentationId) =>
+        db.collection('presentations').doc(presentationId).get()
+      )
+    );
+
+    // Extract unique conference IDs
+    const conferenceIds = new Set();
+    presentationDocs.forEach((doc) => {
+      if (doc.exists) {
+        const presentationData = doc.data();
         if (presentationData['conference-id']) {
           conferenceIds.add(presentationData['conference-id']);
         }
       }
+    });
+
+    if (conferenceIds.size === 0) {
+      return res.status(200).json([]); // No conferences, return an empty array
     }
 
-    // Fetch all conference details
-    const conferences = [];
-    for (const conferenceId of conferenceIds) {
-      const conferenceRef = db.collection('conferences').doc(conferenceId);
-      const conferenceDoc = await conferenceRef.get();
+    // Fetch all conferences in parallel
+    const conferenceDocs = await Promise.all(
+      Array.from(conferenceIds).map((conferenceId) =>
+        db.collection('conferences').doc(conferenceId).get()
+      )
+    );
 
-      if (conferenceDoc.exists) {
-        conferences.push({ id: conferenceDoc.id, ...conferenceDoc.data() });
-      }
-    }
+    // Extract conference details
+    const conferences = conferenceDocs
+      .filter((doc) => doc.exists)
+      .map((doc) => ({ id: doc.id, ...doc.data() }));
 
     res.status(200).json(conferences);
   } catch (error) {
@@ -2582,19 +2595,21 @@ app.get('/api/user-conference-presentations', async (req, res) => {
     const userData = userDoc.data();
     const presentationsAuthor = userData['presentations-author'] || [];
 
-    // Fetch all presentations that match the conference ID
-    const presentations = [];
-    for (const presentationId of presentationsAuthor) {
-      const presentationRef = db.collection('presentations').doc(presentationId);
-      const presentationDoc = await presentationRef.get();
-
-      if (presentationDoc.exists) {
-        const presentationData = presentationDoc.data();
-        if (presentationData['conference-id'] === conferenceId) {
-          presentations.push({ id: presentationDoc.id, ...presentationData });
-        }
-      }
+    if (presentationsAuthor.length === 0) {
+      return res.status(200).json([]); // No presentations, return an empty array
     }
+
+    // Fetch all presentations in parallel
+    const presentationDocs = await Promise.all(
+      presentationsAuthor.map((presentationId) =>
+        db.collection('presentations').doc(presentationId).get()
+      )
+    );
+
+    // Filter presentations that match the conference ID
+    const presentations = presentationDocs
+      .filter((doc) => doc.exists && doc.data()['conference-id'] === conferenceId)
+      .map((doc) => ({ id: doc.id, ...doc.data() }));
 
     res.status(200).json(presentations);
   } catch (error) {
