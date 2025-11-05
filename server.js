@@ -2589,6 +2589,7 @@ app.get('/api/user-conference-presentations', async (req, res) => {
     const userDoc = await userRef.get();
 
     if (!userDoc.exists) {
+      console.error(`User ${userId} not found`);
       return res.status(404).json({ error: 'User not found' });
     }
 
@@ -2596,6 +2597,7 @@ app.get('/api/user-conference-presentations', async (req, res) => {
     const presentationsAuthor = userData['presentations-author'] || [];
 
     if (presentationsAuthor.length === 0) {
+      console.log(`User ${userId} has no presentations`);
       return res.status(200).json([]); // No presentations, return an empty array
     }
 
@@ -2606,10 +2608,59 @@ app.get('/api/user-conference-presentations', async (req, res) => {
       )
     );
 
-    // Filter presentations that match the conference ID
+    // Filter presentations that match the conference ID and calculate the state
     const presentations = presentationDocs
-      .filter((doc) => doc.exists && doc.data()['conference-id'] === conferenceId)
-      .map((doc) => ({ id: doc.id, ...doc.data() }));
+      .filter((doc) => {
+        if (!doc.exists) {
+          console.warn(`Presentation document does not exist: ${doc.id}`);
+          return false;
+        }
+        const conferenceIdMatch = doc.data()['conference-id'] === conferenceId;
+        if (!conferenceIdMatch) {
+          console.warn(`Presentation ${doc.id} does not belong to conference ${conferenceId}`);
+        }
+        return conferenceIdMatch;
+      })
+      .map((doc) => {
+        const presentationData = doc.data();
+        const reviewersAssigned = presentationData.reviewersAssigned || [];
+
+        // Determine the state
+        let state = "Pendiente a revisión"; // Default state
+        const allReviewed = reviewersAssigned.every((reviewer) => reviewer.reviewed === true);
+
+        if (allReviewed) {
+          const stateCounts = reviewersAssigned.reduce((counts, reviewer) => {
+            const reviewerState = reviewer.state;
+            if (reviewerState) {
+              counts[reviewerState] = (counts[reviewerState] || 0) + 1;
+            }
+            return counts;
+          }, {});
+
+          console.log(`State counts for presentation ${doc.id}:`, stateCounts);
+
+          // Determine the state with the most votes
+          const maxState = Object.keys(stateCounts).reduce((a, b) =>
+            stateCounts[a] > stateCounts[b] ? a : b,
+            null
+          );
+
+          // Handle tie-breaking logic
+          if (
+            stateCounts["Aceptada con cambios requeridos"] &&
+            (stateCounts["Aceptada"] || stateCounts["No aceptada"])
+          ) {
+            state = "Aceptada con cambios requeridos";
+          } else if (maxState) {
+            state = maxState;
+          } else {
+            console.warn(`No valid state found for presentation ${doc.id}`);
+          }
+        }
+
+        return { id: doc.id, ...presentationData, state };
+      });
 
     res.status(200).json(presentations);
   } catch (error) {
