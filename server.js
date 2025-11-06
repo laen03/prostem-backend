@@ -3565,6 +3565,12 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
 ]), async (req, res) => {
   try {
     const { conferenceId, creationId } = req.params;
+    const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+    //console.log('Received presentationId:', presentationId);
+
+    if (!presentationId) {
+      return res.status(400).json({ error: 'presentationId is required in form-data' });
+    }
 
     // Validate the request
     const files = req.files['correctedDocument'];
@@ -3573,7 +3579,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
     }
     const correctedDocument = files[0];
 
-    // Fetch the presentation document
+    // Fetch the presentation document (by conference-id and creationId)
     const presentationRef = db.collection('presentations')
       .where('conference-id', '==', conferenceId)
       .where('creationId', '==', parseInt(creationId, 10));
@@ -3619,12 +3625,74 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
       lastModified: new Date().toISOString()
     });
 
+    // 1) Update reviewersAssigned in the presentation: set reviewed=false for all
+    const reviewersAssigned = Array.isArray(presentationData.reviewersAssigned)
+      ? presentationData.reviewersAssigned
+      : [];
+
+    //console.log(`Found ${reviewersAssigned.length} reviewers in reviewersAssigned`);
+    //console.log('ReviewersAssigned:', JSON.stringify(reviewersAssigned, null, 2));
+
+    const updatedReviewersAssigned = reviewersAssigned.map(r => ({
+      ...r,
+      reviewed: false
+    }));
+
+    await presentationDoc.ref.update({ reviewersAssigned: updatedReviewersAssigned });
+    console.log('Updated reviewersAssigned in presentation document');
+
+    // 2) For each reviewer, update users/{reviewerId}.presentationsAssigned:
+    //    set reviewed=false where presentationId matches the provided presentationId
+    for (const reviewer of updatedReviewersAssigned) {
+      const reviewerId = reviewer.reviewerId;
+      console.log(`Processing reviewer with ID: ${reviewerId}`);
+      
+      if (!reviewerId) {
+        console.warn('Missing reviewerId in reviewersAssigned item, skipping user update.');
+        continue;
+      }
+
+      const userRef = db.collection('users').doc(reviewerId);
+      const userDoc = await userRef.get();
+
+      if (!userDoc.exists) {
+        console.warn(`User with reviewerId ${reviewerId} not found`);
+        continue;
+      }
+
+      //console.log(`Found user document for reviewerId: ${reviewerId}`);
+      const userData = userDoc.data();
+      const presentationsAssigned = Array.isArray(userData.presentationsAssigned)
+        ? userData.presentationsAssigned
+        : [];
+
+      //console.log(`User ${reviewerId} has ${presentationsAssigned.length} presentations assigned`);
+      //console.log(`PresentationsAssigned for user ${reviewerId}:`, JSON.stringify(presentationsAssigned, null, 2));
+
+      // Find matching presentation
+      const matchingPresentations = presentationsAssigned.filter(assigned => assigned.presentationId === presentationId);
+      //console.log(`Found ${matchingPresentations.length} matching presentations for presentationId: ${presentationId}`);
+
+      const updatedPresentationsAssigned = presentationsAssigned.map(assigned => {
+        if (assigned.presentationId === presentationId) {
+          console.log(`Updating presentation ${assigned.presentationId} from reviewed: ${assigned.reviewed} to reviewed: false`);
+          return { ...assigned, reviewed: false };
+        }
+        return assigned;
+      });
+
+      //console.log(`Updated presentationsAssigned for user ${reviewerId}:`, JSON.stringify(updatedPresentationsAssigned, null, 2));
+      await userRef.update({ presentationsAssigned: updatedPresentationsAssigned });
+      //console.log(`Successfully updated user ${reviewerId} presentationsAssigned`);
+    }
+
     res.status(200).json({
-      message: 'Corrected document uploaded and replaced general document successfully',
-      generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`
+      message: 'Corrected document uploaded, replaced general document, and review flags reset successfully',
+      generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`,
+      presentationIdReceived: presentationId
     });
   } catch (error) {
-    console.error('Error uploading corrected document:', error);
+    //console.error('Error uploading corrected document:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
