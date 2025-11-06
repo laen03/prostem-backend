@@ -1873,6 +1873,12 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
         await presentationRef.update({ overallResult: resultState });
         console.log(`Added overallResult: ${resultState} to presentation: ${presentationId}`);
 
+        // If the overallResult is "Aceptada con cambios requeridos", add the correctedDocumentSent field
+        if (resultState === "Aceptada con cambios requeridos") {
+          await presentationRef.update({ correctedDocumentSent: false });
+          console.log(`Added correctedDocumentSent: false to presentation: ${presentationId}`);
+        }
+
         // Send email to the user
         await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned);
       } else if (currentResultsSent === 1) {
@@ -2589,7 +2595,6 @@ app.get('/api/user-conference-presentations', async (req, res) => {
     const userDoc = await userRef.get();
 
     if (!userDoc.exists) {
-      console.error(`User ${userId} not found`);
       return res.status(404).json({ error: 'User not found' });
     }
 
@@ -2597,7 +2602,6 @@ app.get('/api/user-conference-presentations', async (req, res) => {
     const presentationsAuthor = userData['presentations-author'] || [];
 
     if (presentationsAuthor.length === 0) {
-      console.log(`User ${userId} has no presentations`);
       return res.status(200).json([]); // No presentations, return an empty array
     }
 
@@ -2608,59 +2612,10 @@ app.get('/api/user-conference-presentations', async (req, res) => {
       )
     );
 
-    // Filter presentations that match the conference ID and calculate the state
+    // Filter presentations that match the conference ID
     const presentations = presentationDocs
-      .filter((doc) => {
-        if (!doc.exists) {
-          console.warn(`Presentation document does not exist: ${doc.id}`);
-          return false;
-        }
-        const conferenceIdMatch = doc.data()['conference-id'] === conferenceId;
-        if (!conferenceIdMatch) {
-          console.warn(`Presentation ${doc.id} does not belong to conference ${conferenceId}`);
-        }
-        return conferenceIdMatch;
-      })
-      .map((doc) => {
-        const presentationData = doc.data();
-        const reviewersAssigned = presentationData.reviewersAssigned || [];
-
-        // Determine the state
-        let state = "Pendiente a revisión"; // Default state
-        const allReviewed = reviewersAssigned.every((reviewer) => reviewer.reviewed === true);
-
-        if (allReviewed) {
-          const stateCounts = reviewersAssigned.reduce((counts, reviewer) => {
-            const reviewerState = reviewer.state;
-            if (reviewerState) {
-              counts[reviewerState] = (counts[reviewerState] || 0) + 1;
-            }
-            return counts;
-          }, {});
-
-          console.log(`State counts for presentation ${doc.id}:`, stateCounts);
-
-          // Determine the state with the most votes
-          const maxState = Object.keys(stateCounts).reduce((a, b) =>
-            stateCounts[a] > stateCounts[b] ? a : b,
-            null
-          );
-
-          // Handle tie-breaking logic
-          if (
-            stateCounts["Aceptada con cambios requeridos"] &&
-            (stateCounts["Aceptada"] || stateCounts["No aceptada"])
-          ) {
-            state = "Aceptada con cambios requeridos";
-          } else if (maxState) {
-            state = maxState;
-          } else {
-            console.warn(`No valid state found for presentation ${doc.id}`);
-          }
-        }
-
-        return { id: doc.id, ...presentationData, state };
-      });
+      .filter((doc) => doc.exists && doc.data()['conference-id'] === conferenceId)
+      .map((doc) => ({ id: doc.id, ...doc.data() }));
 
     res.status(200).json(presentations);
   } catch (error) {
@@ -3514,13 +3469,14 @@ app.post('/api/presentations', fileUpload.fields([
       'conference-id': conferenceId,
       title,
       summary,
-      area, // Add the area directly as it comes
-      creationId: newCreationId, // Asignar el nuevo creationId
-      paid: false, // Initialize as false
-      reviewed: false, // Initialize as false
-      createdAt: currentDate, // Set creation date
-      lastModified: currentDate, // Set lastModified to the same as createdAt
-      ...otherFields, // Incluir otros campos adicionales
+      area, 
+      creationId: newCreationId, 
+      paid: false, 
+      reviewed: false, 
+      createdAt: currentDate, 
+      lastModified: currentDate,
+      overallResult: "Pendiente a revisión",
+      ...otherFields, 
     };
 
     await presentationRef.set(presentationData);
@@ -3599,6 +3555,76 @@ app.post('/api/presentations', fileUpload.fields([
     });
   } catch (error) {
     console.error('Error creating presentation:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to upload a corrected version of the document
+app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUpload.fields([
+  { name: 'correctedDocument', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+
+    // Validate the request
+    const files = req.files['correctedDocument'];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'The correctedDocument is required' });
+    }
+    const correctedDocument = files[0];
+
+    // Fetch the presentation document
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+
+    // Define the folder path for the presentation
+    const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    if (!fs.existsSync(presentationFolderPath)) {
+      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+    }
+
+    // Remove existing "general-*" file if present
+    try {
+      const folderFiles = fs.readdirSync(presentationFolderPath);
+      const existingGeneral = folderFiles.find(f => f.toLowerCase().startsWith('general-'));
+      if (existingGeneral) {
+        fs.unlinkSync(path.join(presentationFolderPath, existingGeneral));
+      }
+    } catch (cleanErr) {
+      console.warn(`Could not clean previous general file for ${conferenceId}/${creationId}:`, cleanErr);
+    }
+
+    // Save the new file as "general-{originalname}"
+    const generalFileName = `general-${correctedDocument.originalname}`;
+    const destinationPath = path.join(presentationFolderPath, generalFileName);
+
+    fs.renameSync(
+      path.join(__dirname, 'uploads', correctedDocument.filename),
+      destinationPath
+    );
+
+    // Update Firestore: point to the new general file and mark corrected sent
+    await presentationDoc.ref.update({
+      generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`,
+      correctedDocumentSent: true,
+      lastModified: new Date().toISOString()
+    });
+
+    res.status(200).json({
+      message: 'Corrected document uploaded and replaced general document successfully',
+      generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`
+    });
+  } catch (error) {
+    console.error('Error uploading corrected document:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
