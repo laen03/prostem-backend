@@ -1862,9 +1862,21 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
       console.log(`State counts: ${JSON.stringify(stateCounts)}`);
 
       // Determine the majority state
-      const resultState = Object.keys(stateCounts).reduce((a, b) =>
-        stateCounts[a] > stateCounts[b] ? a : b
-      );
+      const acceptedCombined = stateCounts.Aceptada + stateCounts["Aceptada con cambios requeridos"];
+      const noAccepted = stateCounts["No Aceptada"];
+      let resultState;
+
+      if (acceptedCombined > noAccepted) {
+        // If there is at least one "Aceptada con cambios requeridos," the result is "Aceptada con cambios requeridos"
+        if (stateCounts["Aceptada con cambios requeridos"] > 0) {
+          resultState = "Aceptada con cambios requeridos";
+        } else {
+          resultState = "Aceptada";
+        }
+      } else {
+        resultState = "No Aceptada";
+      }
+
       console.log(`Result state: ${resultState}`);
 
       // Handle results based on resultsSent
@@ -1887,13 +1899,66 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
         console.log(`Overall result: ${overallResult}`);
 
         if (overallResult === "Aceptada con cambios requeridos") {
-          // Recalculate the result and send an email
+          // Recalculate the result and update the overallResult field
+          await presentationRef.update({ overallResult: resultState });
+          console.log(`Updated overallResult to: ${resultState} for presentation: ${presentationId}`);
+
+          // Send an email with the updated result
           await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned);
         }
       } else if (currentResultsSent === 2) {
-        // Do nothing for resultsSent = 2
-        console.log(`No action for resultsSent = 2`);
-        continue;
+        // NEW: Final validation for presentation acceptance
+        console.log(`Final validation for presentation: ${presentationId}`);
+        
+        // First check: overallResult must be "Aceptada"
+        const overallResult = presentationData.overallResult;
+        console.log(`Overall result check: ${overallResult}`);
+        
+        if (overallResult === "Aceptada") {
+          // Only proceed with validation if overallResult is "Aceptada"
+          console.log(`Presentation ${presentationId} is "Aceptada", proceeding with final validation`);
+          
+          // Check the three required conditions
+          const paidCondition = presentationData.paid === true;
+          const finalVersionCondition = presentationData.finalVersionUploaded === true;
+          const presentationDocCondition = presentationData.presentationDocumentPath && 
+                                         presentationData.presentationDocumentPath.trim() !== '';
+          
+          console.log(`Conditions check - Paid: ${paidCondition}, Final Version: ${finalVersionCondition}, Presentation Doc: ${presentationDocCondition}`);
+          
+          // Check if all conditions are met
+          if (paidCondition && finalVersionCondition && presentationDocCondition) {
+            // All conditions met - set DefinitiveState to true
+            await presentationRef.update({ DefinitiveState: true });
+            console.log(`Set DefinitiveState: true for presentation: ${presentationId}`);
+            
+            // Send success email
+            await sendFinalAcceptanceEmail(creatorId, presentationTitle, conferenceTitle);
+          } else {
+            // Some conditions not met - set DefinitiveState to false
+            await presentationRef.update({ DefinitiveState: false });
+            console.log(`Set DefinitiveState: false for presentation: ${presentationId}`);
+            
+            // Determine which conditions weren't met
+            const missingConditions = [];
+            if (!paidCondition) {
+              missingConditions.push("pago no completado o no aceptado");
+            }
+            if (!finalVersionCondition) {
+              missingConditions.push("versión final con autores no subida");
+            }
+            if (!presentationDocCondition) {
+              missingConditions.push("documento de presentación no subido");
+            }
+            
+            // Send rejection email with specific reasons
+            await sendFinalRejectionEmail(creatorId, presentationTitle, conferenceTitle, missingConditions);
+          }
+        } else {
+          // overallResult is not "Aceptada" - skip this presentation entirely
+          console.log(`Presentation ${presentationId} has overallResult: "${overallResult}" - skipping final validation`);
+          // No emails sent, no DefinitiveState set
+        }
       }
     }
 
@@ -1903,6 +1968,117 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// NEW: Function to send final acceptance email
+async function sendFinalAcceptanceEmail(creatorId, presentationTitle, conferenceTitle) {
+  try {
+    // Get user email from database
+    const userRef = db.collection('users').doc(creatorId);
+    const userDoc = await userRef.get();
+    
+    if (!userDoc.exists) {
+      console.error(`User ${creatorId} not found`);
+      return;
+    }
+    
+    const userData = userDoc.data();
+    const userEmail = userData.email;
+    const userName = userData.name || 'Estimado/a participante';
+    
+    const mailOptions = {
+      from: process.env.EMAIL_FROM,
+      to: userEmail,
+      subject: `🎉 Presentación Aceptada - ${conferenceTitle}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #4CAF50;">¡Felicitaciones! Su presentación ha sido aceptada</h2>
+          
+          <p>Estimado/a ${userName},</p>
+          
+          <p>Nos complace informarle que su presentación <strong>"${presentationTitle}"</strong> para el ${conferenceTitle} ha sido <strong>definitivamente aceptada</strong>.</p>
+          
+          <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h3 style="color: #28a745; margin-top: 0;">✅ Todo está en orden</h3>
+            <p>Hemos verificado que:</p>
+            <ul>
+              <li>Su pago ha sido procesado correctamente</li>
+              <li>La versión final con autores ha sido recibida</li>
+              <li>Su documento de presentación está listo</li>
+            </ul>
+          </div>
+          
+          <p><strong>Está completamente preparado/a para su presentación en la conferencia.</strong></p>
+          
+          <p>La fecha y hora específica de su presentación le será enviada próximamente.</p>
+          
+          <p>¡Esperamos verle en el evento!</p>
+          
+          <hr style="margin: 30px 0;">
+          <p style="color: #666; font-size: 12px;">Este es un mensaje automático. Por favor, no responder a este correo.</p>
+        </div>
+      `
+    };
+    
+    await transporter.sendMail(mailOptions);
+    console.log(`Final acceptance email sent successfully to ${userEmail}`);
+  } catch (error) {
+    console.error('Error sending final acceptance email:', error);
+  }
+}
+
+// NEW: Function to send final rejection email
+async function sendFinalRejectionEmail(creatorId, presentationTitle, conferenceTitle, missingConditions) {
+  try {
+    // Get user email from database
+    const userRef = db.collection('users').doc(creatorId);
+    const userDoc = await userRef.get();
+    
+    if (!userDoc.exists) {
+      console.error(`User ${creatorId} not found`);
+      return;
+    }
+    
+    const userData = userDoc.data();
+    const userEmail = userData.email;
+    const userName = userData.name || 'Estimado/a participante';
+    
+    const conditionsText = missingConditions.join(', ');
+    
+    const mailOptions = {
+      from: process.env.EMAIL_FROM,
+      to: userEmail,
+      subject: `❌ Presentación No Aceptada - ${conferenceTitle}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #DC3545;">Presentación No Aceptada</h2>
+          
+          <p>Estimado/a ${userName},</p>
+          
+          <p>Lamentablemente, su presentación <strong>"${presentationTitle}"</strong> para el ${conferenceTitle} <strong>no ha sido aceptada definitivamente</strong>.</p>
+          
+          <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;">
+            <h3 style="color: #856404; margin-top: 0;">Motivo(s) de no aceptación:</h3>
+            <p style="color: #856404; margin-bottom: 0;">${conditionsText}</p>
+          </div>
+          
+          <p>Para que su presentación sea considerada en futuras conferencias, asegúrese de cumplir con todos los requisitos establecidos.</p>
+          
+          <p>Si tiene alguna consulta, no dude en contactarnos.</p>
+          
+          <p>Gracias por su participación.</p>
+          
+          <hr style="margin: 30px 0;">
+          <p style="color: #666; font-size: 12px;">Este es un mensaje automático. Por favor, no responder a este correo.</p>
+        </div>
+      `
+    };
+    
+    await transporter.sendMail(mailOptions);
+    console.log(`Final rejection email sent successfully to ${userEmail}`);
+  } catch (error) {
+    console.error('Error sending final rejection email:', error);
+  }
+}
 
 // Helper function to send result emails
 async function sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned) {
@@ -2012,16 +2188,26 @@ app.put("/api/conferences/:id", async (req, res) => {
 })
 
 
-//Endpoint to get all conferences 
-app.get("/api/conferences", async (req, res) =>{
-  try{
-    const data = await conferencesDB.get()
-    const conferences = data.docs.map(doc => ({id: doc.id, ...doc.data()})) 
-    res.status(201).json(conferences)
-  }catch(error){
-    res.status(500).json({"error": error.message})
+// Endpoint to get all conferences excluding those created by the current user
+app.get("/api/conferences", async (req, res) => {
+  const userId = req.query.userId;
+
+  if (!userId) {
+    return res.status(400).json({ error: "User ID is required" });
   }
-})
+
+  try {
+    const data = await conferencesDB.get();
+    const conferences = data.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter(conference => conference.managerId !== userId); // Exclude conferences created by the user
+
+    res.status(200).json(conferences);
+  } catch (error) {
+    console.error("Error fetching conferences:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 
 
@@ -2482,38 +2668,38 @@ app.get('/api/areas', async (req, res) => {
   }
 });
 
-// Endpoint to check if a reviewer is assigned to a presentation
-app.get("/api/isAssigned", async (req, res) => {
+// Endpoint to check if a reviewer is assigned to a specific presentation
+app.get('/api/isAssigned', async (req, res) => {
   const { reviewerId, presentationId } = req.query;
 
   if (!reviewerId || !presentationId) {
-    return res.status(400).json({ error: "Reviewer ID and Presentation ID are required" });
+    return res.status(400).json({ error: 'ReviewerId and presentationId are required' });
   }
 
   try {
-    const reviewerDoc = await db.collection("users").doc(reviewerId).get();
-
+    // Get the reviewer (user) document
+    const reviewerDoc = await db.collection('users').doc(reviewerId).get();
+    
     if (!reviewerDoc.exists) {
-      return res.status(404).json({ error: "Reviewer not found" });
+      return res.status(404).json({ error: 'Reviewer not found' });
     }
 
     const reviewerData = reviewerDoc.data();
-    const assignments = reviewerData.presentationsAssigned || [];
-
-    // Support array of strings and array of maps { presentationId, reviewed }
-    const isAssigned = assignments.some((item) =>
+    const presentationsAssigned = reviewerData.presentationsAssigned || [];
+    
+    // Check if the presentation ID is in the reviewer's assigned presentations
+    const isAssigned = presentationsAssigned.some((item) =>
       typeof item === 'string'
         ? item === presentationId
         : item?.presentationId === presentationId
     );
-
+    
     res.status(200).json({ isAssigned });
   } catch (error) {
-    console.error("Error checking if reviewer is assigned:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('Error checking reviewer assignment:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
-
 
 
 // Endpoint to get all conferences in which the current user has presentations
@@ -2655,6 +2841,7 @@ app.post('/api/revision-forms', async (req, res) => {
 // Endpoint to find reviewers by presentation area (from the users collection)
 app.get('/api/reviewers-by-presentation/:presentationId', async (req, res) => {
   const { presentationId } = req.params;
+  const { area } = req.query; // Get the area from query parameter
 
   if (!presentationId) {
     return res.status(400).json({ error: 'Presentation ID is required' });
@@ -2671,14 +2858,159 @@ app.get('/api/reviewers-by-presentation/:presentationId', async (req, res) => {
 
     const presentationData = presentationDoc.data();
     const presentationArea = presentationData.area; // Get the area of the presentation
+    
+    // FIXED: Use the area parameter directly, don't default to presentation area
+    const targetArea = area; // Use ONLY the provided area parameter
+    
+    console.log(`Target area for search: "${targetArea}"`); // DEBUG
+    console.log(`Presentation area: "${presentationArea}"`); // DEBUG
 
-    if (!presentationArea) {
-      console.log(`Presentation with ID ${presentationId} does not have an area.`);
-      return res.status(400).json({ error: 'Presentation area is missing' });
+    // Query the users collection for reviewers with matching areas
+    const usersQuery = await db.collection('users')
+      .where('reviewer', '==', true) // Only fetch users with reviewer set to true
+      .get();
+
+    if (usersQuery.empty) {
+      console.log('No reviewers found with reviewer field set to true.');
+      return res.status(404).json({ error: 'No reviewers found' });
     }
 
+    const reviewers = [];
 
-    // Query the users collection for reviewers with matching specializations
+    usersQuery.forEach((doc) => {
+      const userData = doc.data();
+      console.log(`Checking user ${doc.id}:`, { 
+        specializations: userData.specializations, 
+        areas: userData.areas 
+      }); // DEBUG
+
+      // FIXED: If area is "Todas las áreas" OR no area specified, include ALL reviewers
+      if (!targetArea || targetArea === 'Todas las áreas') {
+        reviewers.push({
+          id: doc.id,
+          name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
+          email: userData.email,
+          institution: userData.institution,
+          presentationsAssigned: userData.presentationsAssigned?.length || 0, // Count of assigned presentations
+          isAssigned: userData.conferencesAssigned?.includes(presentationData['conference-id']) || false, // Check if the user is assigned to the conference
+          specializations: userData.specializations || [], // Keep specializations array
+          matchingArea: presentationArea, // Add the original presentation area as matching area
+        });
+        console.log(`User ${doc.id} included (all areas)`); // DEBUG
+      } else {
+        // Only filter by specific area if it's NOT "Todas las áreas"
+        const userAreas = userData.specializations || userData.areas || [];
+        
+        if (Array.isArray(userAreas) && userAreas.includes(targetArea)) {
+          // Ensure the target area is the first element in the specializations array
+          const specializations = [...userAreas];
+          const index = specializations.indexOf(targetArea);
+          if (index > -1) {
+            specializations.splice(index, 1); // Remove the matching area
+            specializations.unshift(targetArea); // Add it to the beginning
+          }
+
+          reviewers.push({
+            id: doc.id,
+            name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
+            email: userData.email,
+            institution: userData.institution,
+            presentationsAssigned: userData.presentationsAssigned?.length || 0, // Count of assigned presentations
+            isAssigned: userData.conferencesAssigned?.includes(presentationData['conference-id']) || false, // Check if the user is assigned to the conference
+            specializations, // Include the areas array (but keep the property name as specializations for frontend compatibility)
+            matchingArea: targetArea, // Add the matching area
+          });
+          
+          console.log(`User ${doc.id} matches area "${targetArea}"`); // DEBUG
+        } else {
+          console.log(`User ${doc.id} does not match area "${targetArea}" - has areas:`, userAreas); // DEBUG
+        }
+      }
+    });
+
+    console.log(`Found ${reviewers.length} reviewers for area "${targetArea || 'all areas'}"`); // DEBUG
+    res.status(200).json({ reviewers });
+  } catch (error) {
+    console.error('Error fetching reviewers:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to get all users who are not reviewers (potential reviewer candidates)
+app.get('/api/non-reviewers', async (req, res) => {
+  try {
+    // Query the users collection for users who are NOT reviewers
+    const usersQuery = await db.collection('users').get();
+
+    if (usersQuery.empty) {
+      console.log('No users found.');
+      return res.status(404).json({ error: 'No users found' });
+    }
+
+    const nonReviewers = [];
+
+    usersQuery.forEach((doc) => {
+      const userData = doc.data();
+
+      // Include users where reviewer field is false OR reviewer field doesn't exist
+      if (userData.reviewer === false || userData.reviewer === undefined) {
+        nonReviewers.push({
+          id: doc.id,
+          name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
+          email: userData.email,
+          institution: userData.institution,
+          areas: userData.specializations || [], // Include the areas array
+        });
+      }
+    });
+
+    res.status(200).json({ nonReviewers });
+  } catch (error) {
+    console.error('Error fetching non-reviewers:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to make a user a reviewer
+app.patch('/api/make-reviewer/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
+
+  try {
+    // Get the user document
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Update the reviewer field to true
+    await userRef.update({
+      reviewer: true,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    const userData = userDoc.data();
+    const userName = `${userData.name} ${userData.lastName1} ${userData.lastName2}`;
+
+    res.status(200).json({ 
+      message: `${userName} has been made a reviewer successfully`,
+      userId: userId 
+    });
+  } catch (error) {
+    console.error('Error making user a reviewer:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to get all reviewers from the users collection
+app.get('/api/reviewers', async (req, res) => {
+  try {
+    // Query the users collection for reviewers with "reviewer" set to true
     const usersQuery = await db.collection('users')
       .where('reviewer', '==', true) // Only fetch users with reviewer set to true
       .get();
@@ -2693,17 +3025,15 @@ app.get('/api/reviewers-by-presentation/:presentationId', async (req, res) => {
     usersQuery.forEach((doc) => {
       const userData = doc.data();
 
-      // Check if the user's specializations include the presentation area
-      if (userData.specializations && userData.specializations.includes(presentationArea)) {
-        reviewers.push({
-          id: doc.id,
-          name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
-          email: userData.email,
-          institution: userData.institution,
-          presentationsAssigned: userData.presentationsAssigned?.length || 0, // Count of assigned presentations
-          isAssigned: userData.conferencesAssigned?.includes(presentationData['conference-id']) || false, // Check if the user is assigned to the conference
-        });
-      }
+      reviewers.push({
+        id: doc.id,
+        name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
+        email: userData.email,
+        institution: userData.institution,
+        presentationsAssigned: userData.presentationsAssigned?.length || 0, // Count of assigned presentations
+        isAssigned: userData.conferencesAssigned?.length > 0 || false, // Check if the user is assigned to any conference
+        specializations: userData.specializations || [], // Include the specializations array
+      });
     });
 
     res.status(200).json({ reviewers });
@@ -2848,6 +3178,7 @@ app.get('/api/presentations/:presentationId/form', async (req, res) => {
 
     const presentationData = presentationDoc.data();
     const conferenceId = presentationData['conference-id'];
+    const overallResult = presentationData.overallResult || null; // Fetch the overallResult field
 
     if (!conferenceId) {
       return res.status(400).json({ error: 'Conference ID is missing in the presentation' });
@@ -2876,8 +3207,8 @@ app.get('/api/presentations/:presentationId/form', async (req, res) => {
 
     const formData = formDoc.data();
 
-    // Include the formId in the response
-    res.status(200).json({ formId, ...formData });
+    // Include the formId and overallResult in the response
+    res.status(200).json({ formId, overallResult, ...formData });
   } catch (error) {
     console.error('Error fetching form for presentation:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -2959,7 +3290,7 @@ app.get('/api/areas/names', async (req, res) => {
     const areasSnapshot = await db.collection('areas').get();
 
     // Extract the "name" field from each document
-    const areaNames = areasSnapshot.docs.map(doc => doc.data().name);
+    const areaNames = areasSnapshot.docs.map(doc => doc.data().originalWord);
 
     // Return the array of names
     res.status(200).json({ names: areaNames });
@@ -2974,27 +3305,35 @@ app.get('/api/areas/names', async (req, res) => {
 app.get('/api/presentations/area-title/:presentationId', async (req, res) => {
   try {
     const { presentationId } = req.params;
+    console.log(`Getting area and title for presentation ID: ${presentationId}`); // DEBUG
 
     // Fetch the presentation document
     const presentationDoc = await db.collection('presentations').doc(presentationId).get();
 
     if (!presentationDoc.exists) {
+      console.log(`Presentation ${presentationId} not found`); // DEBUG
       return res.status(404).json({ error: 'Presentation not found.' });
     }
 
     const presentationData = presentationDoc.data();
+    console.log(`Presentation data:`, presentationData); // DEBUG - This will show all fields
+    console.log(`Area field value: "${presentationData.area}"`); // DEBUG - Specific area field
+    console.log(`Title field value: "${presentationData.title}"`); // DEBUG - Specific title field
 
     // Check if the area field exists
     if (!presentationData.area) {
+      console.log(`Area field is missing or empty`); // DEBUG
       return res.status(400).json({ error: 'The presentation does not have an area defined.' });
     }
 
     // Check if the title field exists
     if (!presentationData.title) {
+      console.log(`Title field is missing or empty`); // DEBUG
       return res.status(400).json({ error: 'The presentation does not have a title defined.' });
     }
 
     // Return the area and title fields
+    console.log(`Returning area: "${presentationData.area}", title: "${presentationData.title}"`); // DEBUG
     res.status(200).json({ 
       area: presentationData.area,
       title: presentationData.title
@@ -3307,28 +3646,42 @@ app.post('/api/filled-forms', async (req, res) => {
     const allReviewed = updatedReviewersAssigned.every((reviewer) => reviewer.reviewed === true);
 
     if (allReviewed) {
-      // Count the states
-      const stateCounts = updatedReviewersAssigned.reduce((counts, reviewer) => {
+      // NEW LOGIC: Group acceptance vs rejection states
+      let acceptanceCount = 0;
+      let rejectionCount = 0;
+
+      updatedReviewersAssigned.forEach((reviewer) => {
         const state = reviewer.state;
-        if (state) {
-          counts[state] = (counts[state] || 0) + 1;
+        if (state === 'Aceptada' || state === 'Aceptada con cambios requeridos') {
+          acceptanceCount++;
+        } else if (state === 'No aceptada') {
+          rejectionCount++;
         }
-        return counts;
-      }, {});
+      });
 
-      // Check for a draw
-      const states = Object.keys(stateCounts);
-      const maxCount = Math.max(...Object.values(stateCounts));
-      const draw = states.filter((state) => stateCounts[state] === maxCount).length > 1;
+      console.log(`Review results - Acceptance: ${acceptanceCount}, Rejection: ${rejectionCount}`);
 
-      if (draw) {
-        // Fetch the conference ID from the presentation
+      let finalResult = null;
+      let needsTieBreaker = false;
+
+      if (acceptanceCount > rejectionCount) {
+        // Acceptance group wins
+        finalResult = 'Aceptada con cambios requeridos';
+      } else if (rejectionCount > acceptanceCount) {
+        // Rejection group wins
+        finalResult = 'No aceptada';
+      } else {
+        // Tie between acceptance and rejection groups
+        needsTieBreaker = true;
+      }
+
+      if (needsTieBreaker) {
+        // Send tie-breaker email to conference manager
         const conferenceId = presentationData['conference-id'];
         if (!conferenceId) {
           return res.status(404).json({ error: 'Conference ID not found in presentation' });
         }
 
-        // Fetch the conference document to get the manager's email
         const conferenceRef = db.collection('conferences').doc(conferenceId);
         const conferenceDoc = await conferenceRef.get();
 
@@ -3340,7 +3693,6 @@ app.post('/api/filled-forms', async (req, res) => {
         const conferenceTitle = conferenceData.title;
         const managerId = conferenceData.managerId;
 
-        // Fetch the manager's email
         const managerRef = db.collection('users').doc(managerId);
         const managerDoc = await managerRef.get();
 
@@ -3350,19 +3702,22 @@ app.post('/api/filled-forms', async (req, res) => {
 
         const managerEmail = managerDoc.get('email');
 
-        // Send email to the conference manager
         const emailSubject = 'Empate en los resultados de la revisión';
         const emailBody = `
           Estimado usuario,
 
-          La ponencia "${presentationData.title}" de la conferencia "${conferenceTitle}" fue revisada por los revisores que usted le asignó (${reviewersAssigned.length} revisores). 
-          Sin embargo, hay un empate en los resultados de las revisiones, por lo que se le solicita ingresar a la plataforma y agregar un revisor más para desempatar el resultado.
+          La ponencia "${presentationData.title}" de la conferencia "${conferenceTitle}" fue revisada por los revisores que usted le asignó (${updatedReviewersAssigned.length} revisores). 
+          Sin embargo, hay un empate en los resultados de las revisiones (${acceptanceCount} aceptaciones vs ${rejectionCount} rechazos), por lo que se le solicita ingresar a la plataforma y agregar un revisor más para desempatar el resultado.
 
           Atentamente,
           El equipo de la conferencia
         `;
 
         await sendEmail(managerEmail, emailSubject, emailBody);
+      } else {
+        // Update presentation with final result
+        await presentationRef.update({ overallResult: finalResult });
+        console.log(`Presentation final result: ${finalResult}`);
       }
     }
 
@@ -3393,6 +3748,177 @@ app.post('/api/filled-forms', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Endpoint to create a new reviewer (user with reviewer: true)
+app.post('/api/create-reviewer', async (req, res) => {
+  console.log('Create reviewer endpoint called');
+  console.log('Request body:', req.body);
+
+  const {
+    email,
+    name,
+    lastName1,
+    lastName2,
+    phone,
+    birthDate,
+    institution,
+    teachingLevel,
+    specializations,
+    orcidDoi
+  } = req.body;
+
+  // Validate required fields
+  if (!email || !name || !lastName1 || !lastName2 || !phone || !birthDate || !institution || !teachingLevel) {
+    console.log('Missing required fields');
+    return res.status(400).json({ error: 'Faltan campos requeridos' });
+  }
+
+  try {
+    console.log('Checking for existing user with email:', email);
+    
+    // Check if user with this email already exists
+    const existingUserQuery = await db.collection('users').where('email', '==', email).get();
+    
+    if (!existingUserQuery.empty) {
+      console.log('User with this email already exists');
+      return res.status(400).json({ error: 'Ya existe un usuario con este correo electrónico' });
+    }
+
+    console.log('Generating temporary password');
+    // Generate random temporary password (16 characters)
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let tempPassword = '';
+    for (let i = 0; i < 16; i++) {
+      tempPassword += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
+    console.log('Creating Firebase Auth user');
+    // Create user in Firebase Authentication
+    const userRecord = await admin.auth().createUser({
+      email,
+      password: tempPassword,
+      displayName: `${name} ${lastName1}`,
+    });
+
+    console.log('Firebase Auth user created with UID:', userRecord.uid);
+
+    // Parse specializations if provided
+    const parsedSpecializations = Array.isArray(specializations) ? specializations : (specializations ? [specializations] : []);
+
+    console.log('Creating Firestore document');
+    // Create user document in Firestore with reviewer: true
+    const userData = {
+      email,
+      name,
+      lastName1,
+      lastName2,
+      phone,
+      birthDate,
+      institution,
+      teachingLevel,
+      specializations: parsedSpecializations,
+      areas: parsedSpecializations, // Also set areas field for compatibility
+      orcidDoi: orcidDoi || '',
+      reviewer: true, // Set as reviewer
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      active: true,
+      myEvents: null,
+      role: "user",
+      photoURL: null,
+      presentationsAssigned: []
+    };
+
+    await db.collection('users').doc(userRecord.uid).set(userData);
+
+    console.log('User document created successfully');
+
+    // Send email to the new reviewer
+    console.log('Sending email to new reviewer:', email);
+    const mailOptions = {
+      from: 'prostemcr@gmail.com',
+      to: email,
+      subject: 'Bienvenido a ProSTEM - Tu cuenta de revisor ha sido creada',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="color: #007bff; margin: 0;">ProSTEM</h1>
+            <p style="color: #666; margin: 5px 0;">Plataforma de Gestión de Eventos Académicos</p>
+          </div>
+          
+          <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+            <h2 style="color: #333; margin-top: 0;">¡Bienvenido/a como revisor!</h2>
+            <p style="color: #555; line-height: 1.6;">
+              Estimado/a <strong>${name} ${lastName1} ${lastName2}</strong>,
+            </p>
+            <p style="color: #555; line-height: 1.6;">
+              Se ha creado una cuenta para usted en la plataforma ProSTEM y ha sido designado/a como <strong>revisor</strong>. 
+              Su participación es muy valiosa para el proceso de revisión de ponencias académicas.
+            </p>
+          </div>
+
+          <div style="background-color: #e8f4fd; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+            <h3 style="color: #007bff; margin-top: 0;">Credenciales de acceso temporal:</h3>
+            <p style="margin: 10px 0;"><strong>Correo electrónico:</strong> ${email}</p>
+            <p style="margin: 10px 0;"><strong>Contraseña temporal:</strong> <code style="background-color: #fff; padding: 5px 8px; border-radius: 3px; font-family: monospace; color: #d63384;">${tempPassword}</code></p>
+            <p style="color: #856404; font-size: 14px; margin-top: 15px;">
+              <strong>⚠️ Importante:</strong> Por favor, cambie esta contraseña temporal inmediatamente después de iniciar sesión por primera vez.
+            </p>
+          </div>
+
+          <div style="background-color: #fff3cd; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+            <h3 style="color: #856404; margin-top: 0;">Próximos pasos:</h3>
+            <ol style="color: #555; line-height: 1.8;">
+              <li>Ingrese a la plataforma ProSTEM con las credenciales proporcionadas</li>
+              <li>Cambie su contraseña temporal por una segura</li>
+              <li>Complete y actualice su información personal en el perfil</li>
+              <li>Revise las ponencias asignadas para evaluación</li>
+            </ol>
+          </div>
+
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="https://prostem-frontend.vercel.app/auth/login" 
+               style="display: inline-block; padding: 12px 30px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
+              Acceder a ProSTEM
+            </a>
+          </div>
+
+          <div style="border-top: 1px solid #ddd; padding-top: 20px; margin-top: 30px;">
+            <p style="color: #888; font-size: 12px; text-align: center; margin: 0;">
+              Este correo fue enviado automáticamente por la plataforma ProSTEM. 
+              Si tiene alguna duda, contacte al administrador de la plataforma.
+            </p>
+          </div>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log('Email sent successfully to new reviewer');
+
+    res.status(201).json({ 
+      message: 'Revisor creado exitosamente',
+      uid: userRecord.uid,
+      tempPassword: tempPassword // Return temp password for admin to share with user
+    });
+
+  } catch (error) {
+    console.error('Detailed error creating reviewer:', error);
+    
+    // More specific error handling
+    if (error.code === 'auth/email-already-exists') {
+      return res.status(400).json({ error: 'Ya existe un usuario con este correo electrónico' });
+    } else if (error.code === 'auth/invalid-email') {
+      return res.status(400).json({ error: 'Correo electrónico inválido' });
+    } else if (error.code === 'auth/weak-password') {
+      return res.status(400).json({ error: 'Contraseña muy débil' });
+    }
+    
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      details: error.message // Include error details for debugging
+    });
+  }
+});
 //################################################################################################
 
 
@@ -3416,6 +3942,32 @@ const fileUpload = multer({
     const ext = path.extname(file.originalname).toLowerCase();
     if (!allowedExtensions.includes(ext)) {
       return cb(new Error('Only PDF, Word, and PowerPoint files are allowed'));
+    }
+    cb(null, true);
+  }
+});
+
+// Configuración de Multer específica para comprobantes de pago
+const paymentUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadPath = path.join(__dirname, 'uploads');
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      cb(null, `${uniqueSuffix}-${file.originalname}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    // Only allow JPG, JPEG, PNG, and PDF for payment receipts
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.pdf'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!allowedExtensions.includes(ext)) {
+      return cb(new Error('Only JPG, JPEG, PNG, and PDF files are allowed for payment receipts'));
     }
     cb(null, true);
   }
@@ -3566,7 +4118,6 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
   try {
     const { conferenceId, creationId } = req.params;
     const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
-    //console.log('Received presentationId:', presentationId);
 
     if (!presentationId) {
       return res.status(400).json({ error: 'presentationId is required in form-data' });
@@ -3591,6 +4142,20 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
 
     const presentationDoc = presentationSnapshot.docs[0];
     const presentationData = presentationDoc.data();
+
+    // Get presentation title
+    const presentationTitle = presentationData.title || 'Sin título';
+
+    // Fetch conference data to get conference title
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+    
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+    
+    const conferenceData = conferenceDoc.data();
+    const conferenceTitle = conferenceData.title || 'Sin título';
 
     // Define the folder path for the presentation
     const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
@@ -3630,9 +4195,6 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
       ? presentationData.reviewersAssigned
       : [];
 
-    //console.log(`Found ${reviewersAssigned.length} reviewers in reviewersAssigned`);
-    //console.log('ReviewersAssigned:', JSON.stringify(reviewersAssigned, null, 2));
-
     const updatedReviewersAssigned = reviewersAssigned.map(r => ({
       ...r,
       reviewed: false
@@ -3641,8 +4203,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
     await presentationDoc.ref.update({ reviewersAssigned: updatedReviewersAssigned });
     console.log('Updated reviewersAssigned in presentation document');
 
-    // 2) For each reviewer, update users/{reviewerId}.presentationsAssigned:
-    //    set reviewed=false where presentationId matches the provided presentationId
+    // 2) For each reviewer, update users/{reviewerId}.presentationsAssigned and send email
     for (const reviewer of updatedReviewersAssigned) {
       const reviewerId = reviewer.reviewerId;
       console.log(`Processing reviewer with ID: ${reviewerId}`);
@@ -3660,18 +4221,14 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
         continue;
       }
 
-      //console.log(`Found user document for reviewerId: ${reviewerId}`);
       const userData = userDoc.data();
+      const reviewerEmail = userData.email;
+      const reviewerName = userData.name || 'Revisor';
+
+      // Update presentationsAssigned
       const presentationsAssigned = Array.isArray(userData.presentationsAssigned)
         ? userData.presentationsAssigned
         : [];
-
-      //console.log(`User ${reviewerId} has ${presentationsAssigned.length} presentations assigned`);
-      //console.log(`PresentationsAssigned for user ${reviewerId}:`, JSON.stringify(presentationsAssigned, null, 2));
-
-      // Find matching presentation
-      const matchingPresentations = presentationsAssigned.filter(assigned => assigned.presentationId === presentationId);
-      //console.log(`Found ${matchingPresentations.length} matching presentations for presentationId: ${presentationId}`);
 
       const updatedPresentationsAssigned = presentationsAssigned.map(assigned => {
         if (assigned.presentationId === presentationId) {
@@ -3681,22 +4238,582 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
         return assigned;
       });
 
-      //console.log(`Updated presentationsAssigned for user ${reviewerId}:`, JSON.stringify(updatedPresentationsAssigned, null, 2));
       await userRef.update({ presentationsAssigned: updatedPresentationsAssigned });
-      //console.log(`Successfully updated user ${reviewerId} presentationsAssigned`);
+
+      // Send email notification to reviewer
+      if (reviewerEmail) {
+        try {
+          const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: reviewerEmail,
+            subject: `Nueva versión corregida disponible - ${presentationTitle}`,
+            html: `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <style>
+                  body {
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                  }
+                  .header {
+                    background-color: #f4f4f4;
+                    padding: 20px;
+                    text-align: center;
+                    border-radius: 10px;
+                    margin-bottom: 20px;
+                  }
+                  .content {
+                    padding: 20px;
+                    background-color: #fff;
+                    border-radius: 10px;
+                    border: 1px solid #ddd;
+                  }
+                  .highlight {
+                    background-color: #e7f3ff;
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin: 15px 0;
+                  }
+                  .footer {
+                    text-align: center;
+                    margin-top: 20px;
+                    font-size: 12px;
+                    color: #666;
+                  }
+                </style>
+              </head>
+              <body>
+                <div class="header">
+                  <h2>🔄 Nueva Versión Corregida Disponible</h2>
+                </div>
+                
+                <div class="content">
+                  <p>Estimado/a <strong>${reviewerName}</strong>,</p>
+                  
+                  <p>Le informamos que se ha subido una nueva versión corregida del documento para la siguiente presentación:</p>
+                  
+                  <div class="highlight">
+                    <p><strong>📋 Presentación:</strong> ${presentationTitle}</p>
+                    <p><strong>🏛️ Conferencia:</strong> ${conferenceTitle}</p>
+                  </div>
+                  
+                  <p>El ponente ha realizado las correcciones solicitadas y ha enviado una nueva versión del documento. Es necesario que revise nuevamente la presentación para evaluar las modificaciones realizadas.</p>
+                  
+                  <p><strong>Acciones requeridas:</strong></p>
+                  <ul>
+                    <li>Iniciar sesión en la plataforma ProSTEM</li>
+                    <li>Acceder a la sección de revisiones</li>
+                    <li>Evaluar la nueva versión del documento</li>
+                    <li>Completar el formulario de evaluación correspondiente</li>
+                  </ul>
+                  
+                  <p>Su evaluación es fundamental para el proceso de revisión académica. Agradecemos su tiempo y dedicación.</p>
+                  
+                  <p>Saludos cordiales,<br>
+                  <strong>Equipo ProSTEM</strong></p>
+                </div>
+                
+                <div class="footer">
+                  <p>Este es un mensaje automático. Por favor, no responda a este correo.</p>
+                </div>
+              </body>
+              </html>
+            `
+          };
+
+          await transporter.sendMail(mailOptions);
+          console.log(`Email sent successfully to reviewer: ${reviewerEmail}`);
+        } catch (emailError) {
+          console.error(`Failed to send email to reviewer ${reviewerEmail}:`, emailError);
+        }
+      } else {
+        console.warn(`No email found for reviewer ${reviewerId}`);
+      }
     }
 
     res.status(200).json({
-      message: 'Corrected document uploaded, replaced general document, and review flags reset successfully',
+      message: 'Corrected document uploaded, replaced general document, review flags reset, and reviewers notified successfully',
       generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`,
-      presentationIdReceived: presentationId
+      presentationIdReceived: presentationId,
+      emailsSent: updatedReviewersAssigned.length
     });
   } catch (error) {
-    //console.error('Error uploading corrected document:', error);
+    console.error('Error uploading corrected document:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
+
+// Endpoint to upload a presentation file
+app.post('/api/presentations/:conferenceId/:creationId/upload-presentation', fileUpload.fields([
+  { name: 'presentationDocument', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+    const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+
+    if (!presentationId) {
+      return res.status(400).json({ error: 'presentationId is required in form-data' });
+    }
+
+    // Validate the request
+    const files = req.files['presentationDocument'];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'The presentationDocument is required' });
+    }
+    const presentationDocument = files[0];
+
+    // Fetch the presentation document (by conference-id and creationId)
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+
+    // Define the folder path for the presentation
+    const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    if (!fs.existsSync(presentationFolderPath)) {
+      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+    }
+
+    // Remove existing "presentation-*" file if present
+    try {
+      const folderFiles = fs.readdirSync(presentationFolderPath);
+      const existingPresentation = folderFiles.find(f => f.toLowerCase().startsWith('presentation-'));
+      if (existingPresentation) {
+        fs.unlinkSync(path.join(presentationFolderPath, existingPresentation));
+        console.log(`Removed existing presentation file: ${existingPresentation}`);
+      }
+    } catch (cleanErr) {
+      console.warn(`Could not clean previous presentation file for ${conferenceId}/${creationId}:`, cleanErr);
+    }
+
+    // Save the new file as "presentation-{originalname}"
+    const presentationFileName = `presentation-${presentationDocument.originalname}`;
+    const destinationPath = path.join(presentationFolderPath, presentationFileName);
+
+    fs.renameSync(
+      path.join(__dirname, 'uploads', presentationDocument.filename),
+      destinationPath
+    );
+
+    // Update Firestore: add the presentation file path
+    await presentationDoc.ref.update({
+      presentationDocumentPath: `/uploads/${conferenceId}/${creationId}/${presentationFileName}`,
+      presentationDocumentSent: true,
+      lastModified: new Date().toISOString()
+    });
+
+    res.status(200).json({
+      message: 'Presentation document uploaded successfully',
+      presentationDocumentPath: `/uploads/${conferenceId}/${creationId}/${presentationFileName}`,
+      presentationIdReceived: presentationId
+    });
+  } catch (error) {
+    console.error('Error uploading presentation document:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to upload final document with authors
+app.post('/api/presentations/:conferenceId/:creationId/upload-final', fileUpload.fields([
+  { name: 'finalDocument', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+    const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+
+    if (!presentationId) {
+      return res.status(400).json({ error: 'presentationId is required in form-data' });
+    }
+
+    // Validate the request
+    const files = req.files['finalDocument'];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'The finalDocument is required' });
+    }
+    const finalDocument = files[0];
+
+    // Fetch the presentation document (by conference-id and creationId)
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+
+    // Define the folder path for the final document
+    const finalFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    if (!fs.existsSync(finalFolderPath)) {
+      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+    }
+
+    // Remove existing "final-*" file if present
+    try {
+      const folderFiles = fs.readdirSync(finalFolderPath);
+      const existingFinal = folderFiles.find(f => f.toLowerCase().startsWith('final-'));
+      if (existingFinal) {
+        fs.unlinkSync(path.join(finalFolderPath, existingFinal));
+        console.log(`Removed existing final document file: ${existingFinal}`);
+      }
+    } catch (cleanErr) {
+      console.warn(`Could not clean previous final document file for ${conferenceId}/${creationId}:`, cleanErr);
+    }
+
+    // Save the new file as "final-{originalname}"
+    const finalFileName = `final-${finalDocument.originalname}`;
+    const destinationPath = path.join(finalFolderPath, finalFileName);
+
+    fs.renameSync(
+      path.join(__dirname, 'uploads', finalDocument.filename),
+      destinationPath
+    );
+
+    // Update Firestore: add the final document file path and set finalVersionUploaded to true
+    await presentationDoc.ref.update({
+      finalDocumentPath: `/uploads/${conferenceId}/${creationId}/${finalFileName}`,
+      finalVersionUploaded: true,
+      lastModified: new Date().toISOString()
+    });
+
+    res.status(200).json({
+      message: 'Final document uploaded successfully',
+      finalDocumentPath: `/uploads/${conferenceId}/${creationId}/${finalFileName}`,
+      finalVersionUploaded: true,
+      presentationIdReceived: presentationId
+    });
+  } catch (error) {
+    console.error('Error uploading final document:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+// Endpoint to upload a payment receipt file
+app.post('/api/presentations/:conferenceId/:creationId/upload-payment', paymentUpload.fields([
+  { name: 'paymentDocument', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+    const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+
+    if (!presentationId) {
+      return res.status(400).json({ error: 'presentationId is required in form-data' });
+    }
+
+    // Validate the request
+    const files = req.files['paymentDocument'];
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'The paymentDocument is required' });
+    }
+    const paymentDocument = files[0];
+
+    // Validate file type (only jpg, jpeg, png, pdf)
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.pdf'];
+    const ext = path.extname(paymentDocument.originalname).toLowerCase();
+    if (!allowedExtensions.includes(ext)) {
+      return res.status(400).json({ error: 'Only JPG, JPEG, PNG, and PDF files are allowed for payment receipts' });
+    }
+
+    // Fetch the presentation document (by conference-id and creationId)
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+
+    // Define the folder path for the presentation
+    const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    if (!fs.existsSync(presentationFolderPath)) {
+      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+    }
+
+    // Remove existing "bill-*" file if present
+    try {
+      const folderFiles = fs.readdirSync(presentationFolderPath);
+      const existingBill = folderFiles.find(f => f.toLowerCase().startsWith('bill-'));
+      if (existingBill) {
+        fs.unlinkSync(path.join(presentationFolderPath, existingBill));
+        console.log(`Removed existing payment receipt file: ${existingBill}`);
+      }
+    } catch (cleanErr) {
+      console.warn(`Could not clean previous payment receipt file for ${conferenceId}/${creationId}:`, cleanErr);
+    }
+
+    // Save the new file as "bill-{originalname}"
+    const billFileName = `bill-${paymentDocument.originalname}`;
+    const destinationPath = path.join(presentationFolderPath, billFileName);
+
+    fs.renameSync(
+      path.join(__dirname, 'uploads', paymentDocument.filename),
+      destinationPath
+    );
+
+    // Update Firestore: add the payment receipt file path
+    await presentationDoc.ref.update({
+      paymentReceiptPath: `/uploads/${conferenceId}/${creationId}/${billFileName}`,
+      paymentReceiptSent: true,
+      lastModified: new Date().toISOString()
+    });
+
+    res.status(200).json({
+      message: 'Payment receipt uploaded successfully',
+      paymentReceiptPath: `/uploads/${conferenceId}/${creationId}/${billFileName}`,
+      presentationIdReceived: presentationId
+    });
+  } catch (error) {
+    console.error('Error uploading payment receipt:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+// Endpoint to view a presentation document by conferenceId and creationId
+app.get('/api/presentations/:conferenceId/:creationId/view-presentation', async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+
+    // Find the presentation document
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+    const presentationDocumentPath = presentationData.presentationDocumentPath;
+
+    if (!presentationDocumentPath) {
+      return res.status(404).json({ error: 'Presentation document not found' });
+    }
+
+    // Build the file path
+    const filePath = path.join(__dirname, presentationDocumentPath);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Presentation document file not found on server' });
+    }
+
+    // Determine content type based on file extension
+    const ext = path.extname(filePath).toLowerCase();
+    let contentType = 'application/octet-stream';
+    
+    if (ext === '.pdf') {
+      contentType = 'application/pdf';
+    } else if (['.doc', '.docx'].includes(ext)) {
+      contentType = 'application/msword';
+    } else if (['.ppt', '.pptx'].includes(ext)) {
+      contentType = 'application/vnd.ms-powerpoint';
+    }
+
+    // Set appropriate headers and send the file
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', 'inline');
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error viewing presentation document:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to download a presentation document by conferenceId and creationId
+app.get('/api/presentations/:conferenceId/:creationId/download-presentation', async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+
+    // Find the presentation document
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+    const presentationDocumentPath = presentationData.presentationDocumentPath;
+
+    if (!presentationDocumentPath) {
+      return res.status(404).json({ error: 'Presentation document not found' });
+    }
+
+    // Build the file path
+    const filePath = path.join(__dirname, presentationDocumentPath);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Presentation document file not found on server' });
+    }
+
+    // Extract filename for download
+    const filename = path.basename(presentationDocumentPath);
+    
+    // Set headers for download
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error downloading presentation document:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to view a payment receipt by conferenceId and creationId
+app.get('/api/presentations/:conferenceId/:creationId/view-payment', async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+
+    // Find the presentation document
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+    const paymentReceiptPath = presentationData.paymentReceiptPath;
+
+    if (!paymentReceiptPath) {
+      return res.status(404).json({ error: 'Payment receipt not found' });
+    }
+
+    // Build the file path
+    const filePath = path.join(__dirname, paymentReceiptPath);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Payment receipt file not found on server' });
+    }
+
+    // Determine content type based on file extension
+    const ext = path.extname(filePath).toLowerCase();
+    let contentType = 'application/octet-stream';
+    
+    if (ext === '.pdf') {
+      contentType = 'application/pdf';
+    } else if (['.jpg', '.jpeg'].includes(ext)) {
+      contentType = 'image/jpeg';
+    } else if (ext === '.png') {
+      contentType = 'image/png';
+    }
+
+    // Set appropriate headers and send the file
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', 'inline');
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error viewing payment receipt:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to download a payment receipt by conferenceId and creationId
+app.get('/api/presentations/:conferenceId/:creationId/download-payment', async (req, res) => {
+  try {
+    const { conferenceId, creationId } = req.params;
+
+    // Find the presentation document
+    const presentationRef = db.collection('presentations')
+      .where('conference-id', '==', conferenceId)
+      .where('creationId', '==', parseInt(creationId, 10));
+    const presentationSnapshot = await presentationRef.get();
+
+    if (presentationSnapshot.empty) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    const presentationDoc = presentationSnapshot.docs[0];
+    const presentationData = presentationDoc.data();
+    const paymentReceiptPath = presentationData.paymentReceiptPath;
+
+    if (!paymentReceiptPath) {
+      return res.status(404).json({ error: 'Payment receipt not found' });
+    }
+
+    // Build the file path
+    const filePath = path.join(__dirname, paymentReceiptPath);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Payment receipt file not found on server' });
+    }
+
+    // Extract filename for download
+    const filename = path.basename(paymentReceiptPath);
+    
+    // Set headers for download
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error downloading payment receipt:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to update payment status (paid field) of a presentation
+app.patch('/api/presentations/:presentationId/payment-status', async (req, res) => {
+  try {
+    const { presentationId } = req.params;
+    const { paid } = req.body;
+
+    if (typeof paid !== 'boolean') {
+      return res.status(400).json({ error: 'paid field must be a boolean value' });
+    }
+
+    // Find the presentation by ID
+    const presentationRef = db.collection('presentations').doc(presentationId);
+    const presentationDoc = await presentationRef.get();
+
+    if (!presentationDoc.exists) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    // Update the paid field AND set paymentReviewed to true
+    await presentationRef.update({
+      paid: paid,
+      paymentReviewed: true,
+      lastModified: new Date().toISOString()
+    });
+
+    res.status(200).json({
+      message: `Payment status updated to ${paid ? 'accepted' : 'rejected'}`,
+      presentationId: presentationId,
+      paid: paid,
+      paymentReviewed: true
+    });
+  } catch (error) {
+    console.error('Error updating payment status:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 //#################################################################################################
 
 app.listen(PORT, (error) => {
