@@ -1853,12 +1853,21 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
 
       // Count the states
       const stateCounts = { Aceptada: 0, "Aceptada con cambios requeridos": 0, "No Aceptada": 0 };
+      
+      //console.log(`=== DEBUG REVIEWER STATES ===`);
       for (const reviewer of reviewersAssigned) {
+        //console.log(`Reviewer ${reviewer.reviewerId}: state = "${reviewer.state}"`);
+        //console.log(`State type: ${typeof reviewer.state}`);
+        //console.log(`State length: ${reviewer.state?.length}`);
         const state = reviewer.state;
         if (stateCounts[state] !== undefined) {
           stateCounts[state]++;
         }
       }
+
+      //console.log(`Final state counts: ${JSON.stringify(stateCounts)}`);
+      //console.log(`=== END DEBUG ===`);
+
       console.log(`State counts: ${JSON.stringify(stateCounts)}`);
 
       // Determine the majority state
@@ -1893,18 +1902,28 @@ app.patch("/api/conferences/:id/update-results", async (req, res) => {
 
         // Send email to the user
         await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned);
-      } else if (currentResultsSent === 1) {
+      }  else if (currentResultsSent === 1) {
         // Check the overallResult field
         const overallResult = presentationData.overallResult;
         console.log(`Overall result: ${overallResult}`);
 
         if (overallResult === "Aceptada con cambios requeridos") {
-          // Recalculate the result and update the overallResult field
-          await presentationRef.update({ overallResult: resultState });
-          console.log(`Updated overallResult to: ${resultState} for presentation: ${presentationId}`);
+          // Check manager approval instead of recalculating from reviewers
+          const managerDocApproval = presentationData.managerDocApproval;
+          let newOverallResult;
+          
+          if (managerDocApproval === true) {
+            newOverallResult = "Aceptada";
+          } else {
+            newOverallResult = "No aceptada";
+          }
+          
+          // Update the overallResult field
+          await presentationRef.update({ overallResult: newOverallResult });
+          console.log(`Updated overallResult to: ${newOverallResult} for presentation: ${presentationId}`);
 
           // Send an email with the updated result
-          await sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned);
+          await sendResultEmail(newOverallResult, creatorId, presentationTitle, conferenceTitle, reviewersAssigned);
         }
       } else if (currentResultsSent === 2) {
         // NEW: Final validation for presentation acceptance
@@ -3646,7 +3665,7 @@ app.post('/api/filled-forms', async (req, res) => {
     const allReviewed = updatedReviewersAssigned.every((reviewer) => reviewer.reviewed === true);
 
     if (allReviewed) {
-      // NEW LOGIC: Group acceptance vs rejection states
+      // Check for ties and send tie-breaker email if needed
       let acceptanceCount = 0;
       let rejectionCount = 0;
 
@@ -3661,21 +3680,8 @@ app.post('/api/filled-forms', async (req, res) => {
 
       console.log(`Review results - Acceptance: ${acceptanceCount}, Rejection: ${rejectionCount}`);
 
-      let finalResult = null;
-      let needsTieBreaker = false;
-
-      if (acceptanceCount > rejectionCount) {
-        // Acceptance group wins
-        finalResult = 'Aceptada con cambios requeridos';
-      } else if (rejectionCount > acceptanceCount) {
-        // Rejection group wins
-        finalResult = 'No aceptada';
-      } else {
-        // Tie between acceptance and rejection groups
-        needsTieBreaker = true;
-      }
-
-      if (needsTieBreaker) {
+      // Only send tie-breaker email if there's actually a tie
+      if (acceptanceCount === rejectionCount) {
         // Send tie-breaker email to conference manager
         const conferenceId = presentationData['conference-id'];
         if (!conferenceId) {
@@ -3714,10 +3720,6 @@ app.post('/api/filled-forms', async (req, res) => {
         `;
 
         await sendEmail(managerEmail, emailSubject, emailBody);
-      } else {
-        // Update presentation with final result
-        await presentationRef.update({ overallResult: finalResult });
-        console.log(`Presentation final result: ${finalResult}`);
       }
     }
 
@@ -4146,7 +4148,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
     // Get presentation title
     const presentationTitle = presentationData.title || 'Sin título';
 
-    // Fetch conference data to get conference title
+    // Fetch conference data to get conference title and manager ID
     const conferenceRef = db.collection('conferences').doc(conferenceId);
     const conferenceDoc = await conferenceRef.get();
     
@@ -4156,6 +4158,11 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
     
     const conferenceData = conferenceDoc.data();
     const conferenceTitle = conferenceData.title || 'Sin título';
+    const managerId = conferenceData.userId; // Get the manager ID from userId field
+
+    if (!managerId) {
+      return res.status(400).json({ error: 'Conference manager ID not found' });
+    }
 
     // Define the folder path for the presentation
     const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
@@ -4190,163 +4197,119 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
       lastModified: new Date().toISOString()
     });
 
-    // 1) Update reviewersAssigned in the presentation: set reviewed=false for all
-    const reviewersAssigned = Array.isArray(presentationData.reviewersAssigned)
-      ? presentationData.reviewersAssigned
-      : [];
+    // Fetch manager's email from users collection
+    const managerRef = db.collection('users').doc(managerId);
+    const managerDoc = await managerRef.get();
 
-    const updatedReviewersAssigned = reviewersAssigned.map(r => ({
-      ...r,
-      reviewed: false
-    }));
+    if (!managerDoc.exists) {
+      return res.status(404).json({ error: 'Conference manager not found' });
+    }
 
-    await presentationDoc.ref.update({ reviewersAssigned: updatedReviewersAssigned });
-    console.log('Updated reviewersAssigned in presentation document');
+    const managerData = managerDoc.data();
+    const managerEmail = managerData.email;
+    const managerName = managerData.name || 'Administrador';
 
-    // 2) For each reviewer, update users/{reviewerId}.presentationsAssigned and send email
-    for (const reviewer of updatedReviewersAssigned) {
-      const reviewerId = reviewer.reviewerId;
-      console.log(`Processing reviewer with ID: ${reviewerId}`);
-      
-      if (!reviewerId) {
-        console.warn('Missing reviewerId in reviewersAssigned item, skipping user update.');
-        continue;
-      }
+    if (!managerEmail) {
+      return res.status(400).json({ error: 'Manager email not found' });
+    }
 
-      const userRef = db.collection('users').doc(reviewerId);
-      const userDoc = await userRef.get();
+    // Send email notification to conference manager
+    try {
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: managerEmail,
+        subject: `Versión corregida subida - ${presentationTitle}`,
+        html: `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <style>
+              body {
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+              }
+              .header {
+                background-color: #f4f4f4;
+                padding: 20px;
+                text-align: center;
+                border-radius: 10px;
+                margin-bottom: 20px;
+              }
+              .content {
+                padding: 20px;
+                background-color: #fff;
+                border-radius: 10px;
+                border: 1px solid #ddd;
+              }
+              .highlight {
+                background-color: #e7f3ff;
+                padding: 15px;
+                border-radius: 5px;
+                margin: 15px 0;
+              }
+              .footer {
+                text-align: center;
+                margin-top: 20px;
+                font-size: 12px;
+                color: #666;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h2>📄 Nueva Versión Corregida Subida</h2>
+            </div>
+            
+            <div class="content">
+              <p>Estimado/a <strong>${managerName}</strong>,</p>
+              
+              <p>Le informamos que se ha subido una nueva versión corregida del documento para la siguiente presentación:</p>
+              
+              <div class="highlight">
+                <p><strong>📋 Presentación:</strong> ${presentationTitle}</p>
+                <p><strong>🏛️ Conferencia:</strong> ${conferenceTitle}</p>
+              </div>
+              
+              <p>El ponente ha realizado las correcciones solicitadas y ha enviado una nueva versión del documento.</p>
+              
+              <p>Puede acceder a la plataforma ProSTEM para revisar la nueva versión del documento y gestionar el proceso de revisión correspondiente.</p>
+              
+              <p>Saludos cordiales,<br>
+              <strong>Equipo ProSTEM</strong></p>
+            </div>
+            
+            <div class="footer">
+              <p>Este es un mensaje automático. Por favor, no responda a este correo.</p>
+            </div>
+          </body>
+          </html>
+        `
+      };
 
-      if (!userDoc.exists) {
-        console.warn(`User with reviewerId ${reviewerId} not found`);
-        continue;
-      }
-
-      const userData = userDoc.data();
-      const reviewerEmail = userData.email;
-      const reviewerName = userData.name || 'Revisor';
-
-      // Update presentationsAssigned
-      const presentationsAssigned = Array.isArray(userData.presentationsAssigned)
-        ? userData.presentationsAssigned
-        : [];
-
-      const updatedPresentationsAssigned = presentationsAssigned.map(assigned => {
-        if (assigned.presentationId === presentationId) {
-          console.log(`Updating presentation ${assigned.presentationId} from reviewed: ${assigned.reviewed} to reviewed: false`);
-          return { ...assigned, reviewed: false };
-        }
-        return assigned;
-      });
-
-      await userRef.update({ presentationsAssigned: updatedPresentationsAssigned });
-
-      // Send email notification to reviewer
-      if (reviewerEmail) {
-        try {
-          const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: reviewerEmail,
-            subject: `Nueva versión corregida disponible - ${presentationTitle}`,
-            html: `
-              <!DOCTYPE html>
-              <html>
-              <head>
-                <style>
-                  body {
-                    font-family: Arial, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                  }
-                  .header {
-                    background-color: #f4f4f4;
-                    padding: 20px;
-                    text-align: center;
-                    border-radius: 10px;
-                    margin-bottom: 20px;
-                  }
-                  .content {
-                    padding: 20px;
-                    background-color: #fff;
-                    border-radius: 10px;
-                    border: 1px solid #ddd;
-                  }
-                  .highlight {
-                    background-color: #e7f3ff;
-                    padding: 15px;
-                    border-radius: 5px;
-                    margin: 15px 0;
-                  }
-                  .footer {
-                    text-align: center;
-                    margin-top: 20px;
-                    font-size: 12px;
-                    color: #666;
-                  }
-                </style>
-              </head>
-              <body>
-                <div class="header">
-                  <h2>🔄 Nueva Versión Corregida Disponible</h2>
-                </div>
-                
-                <div class="content">
-                  <p>Estimado/a <strong>${reviewerName}</strong>,</p>
-                  
-                  <p>Le informamos que se ha subido una nueva versión corregida del documento para la siguiente presentación:</p>
-                  
-                  <div class="highlight">
-                    <p><strong>📋 Presentación:</strong> ${presentationTitle}</p>
-                    <p><strong>🏛️ Conferencia:</strong> ${conferenceTitle}</p>
-                  </div>
-                  
-                  <p>El ponente ha realizado las correcciones solicitadas y ha enviado una nueva versión del documento. Es necesario que revise nuevamente la presentación para evaluar las modificaciones realizadas.</p>
-                  
-                  <p><strong>Acciones requeridas:</strong></p>
-                  <ul>
-                    <li>Iniciar sesión en la plataforma ProSTEM</li>
-                    <li>Acceder a la sección de revisiones</li>
-                    <li>Evaluar la nueva versión del documento</li>
-                    <li>Completar el formulario de evaluación correspondiente</li>
-                  </ul>
-                  
-                  <p>Su evaluación es fundamental para el proceso de revisión académica. Agradecemos su tiempo y dedicación.</p>
-                  
-                  <p>Saludos cordiales,<br>
-                  <strong>Equipo ProSTEM</strong></p>
-                </div>
-                
-                <div class="footer">
-                  <p>Este es un mensaje automático. Por favor, no responda a este correo.</p>
-                </div>
-              </body>
-              </html>
-            `
-          };
-
-          await transporter.sendMail(mailOptions);
-          console.log(`Email sent successfully to reviewer: ${reviewerEmail}`);
-        } catch (emailError) {
-          console.error(`Failed to send email to reviewer ${reviewerEmail}:`, emailError);
-        }
-      } else {
-        console.warn(`No email found for reviewer ${reviewerId}`);
-      }
+      await transporter.sendMail(mailOptions);
+      console.log(`Email sent successfully to conference manager: ${managerEmail}`);
+    } catch (emailError) {
+      console.error(`Failed to send email to manager ${managerEmail}:`, emailError);
+      return res.status(500).json({ error: 'Failed to send notification email' });
     }
 
     res.status(200).json({
-      message: 'Corrected document uploaded, replaced general document, review flags reset, and reviewers notified successfully',
+      message: 'Corrected document uploaded and conference manager notified successfully',
       generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`,
       presentationIdReceived: presentationId,
-      emailsSent: updatedReviewersAssigned.length
+      managerNotified: true
     });
   } catch (error) {
     console.error('Error uploading corrected document:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+
 
 
 // Endpoint to upload a presentation file
@@ -4422,6 +4385,53 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-presentation', fil
     });
   } catch (error) {
     console.error('Error uploading presentation document:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint to update presentation overall result
+app.patch('/api/presentations/:presentationId/overall-result', async (req, res) => {
+  try {
+    const { presentationId } = req.params;
+    const { overallResult } = req.body;
+
+    if (!presentationId) {
+      return res.status(400).json({ error: 'Presentation ID is required' });
+    }
+
+    if (!overallResult) {
+      return res.status(400).json({ error: 'Overall result is required' });
+    }
+
+    // Validate that the result is one of the allowed values
+    const allowedResults = ['Aceptada', 'No aceptada'];
+    if (!allowedResults.includes(overallResult)) {
+      return res.status(400).json({ error: 'Invalid overall result value' });
+    }
+
+    // Find and update the presentation
+    const presentationRef = db.collection('presentations').doc(presentationId);
+    const presentationDoc = await presentationRef.get();
+
+    if (!presentationDoc.exists) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+
+    // Convert result to boolean value for managerDocApproval
+    const managerDocApproval = overallResult === 'Aceptada';
+
+    // Update the managerDocApproval field (NOT overallResult)
+    await presentationRef.update({ 
+      managerDocApproval: managerDocApproval,
+      lastModified: new Date().toISOString()
+    });
+
+    res.status(200).json({ 
+      message: 'Manager document approval updated successfully',
+      managerDocApproval: managerDocApproval
+    });
+  } catch (error) {
+    console.error('Error updating manager document approval:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
