@@ -13,6 +13,8 @@ require("dotenv").config(); // carga las variables de .env
 const path = require('path');
 const fs = require('fs');
 
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+
 
 require("dotenv").config();
 
@@ -4823,7 +4825,1069 @@ app.patch('/api/presentations/:presentationId/payment-status', async (req, res) 
     console.error('Error updating payment status:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});//##########################################3
+
+// Test endpoint for certificate generation
+app.post('/api/test-certificate', async (req, res) => {
+  try {
+    const { speaker_name, conference_title, presentation_title, conference_date } = req.body;
+
+    if (!speaker_name || !conference_title || !presentation_title || !conference_date) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    // Path to your template
+    const templatePath = path.join(__dirname, 'uploads', 'Certificate_template', 'Plantilla.pdf');
+    
+    // Check if template exists
+    try {
+      await require('fs').promises.access(templatePath);
+    } catch (error) {
+      return res.status(404).json({ error: 'Template not found at: ' + templatePath });
+    }
+
+    // Format the Costa Rican date
+    function formatCostaRicanDate(dateString) {
+      const date = new Date(dateString);
+      const months = [
+        'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+        'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre'
+      ];
+      const day = date.getDate();
+      const month = months[date.getMonth()];
+      const year = date.getFullYear();
+      return `${day} de ${month} de ${year}`;
+    }
+
+    // Load PDF template
+    const templateBytes = await require('fs').promises.readFile(templatePath);
+    const pdfDoc = await require('pdf-lib').PDFDocument.load(templateBytes);
+    
+    // Get the first page
+    const pages = pdfDoc.getPages();
+    const firstPage = pages[0];
+    const { width, height } = firstPage.getSize();
+    
+    // Embed fonts
+    const boldFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.HelveticaBold);
+    const regularFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.Helvetica);
+    const italicFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.HelveticaOblique);
+    
+   // Add speaker name (MORE CENTERED)
+    const fontSize = 25;
+    const speakerNameWidth = boldFont.widthOfTextAtSize(speaker_name, fontSize);
+    firstPage.drawText(speaker_name, {
+      x: (width - speakerNameWidth) / 2 + 15, // ← Changed from -1 to +5 (moves right)
+      y: height - 250,
+      size: fontSize,
+      font: boldFont,
+      color: require('pdf-lib').rgb(0, 0, 0),
+    });
+    // Add "por haber participado como ponente en el"
+    const participationText = "por haber participado como ponente en el";
+    firstPage.drawText(participationText, {
+      x: width / 2 - (participationText.length * 2.5),
+      y: height - 290,
+      size: 12,
+      font: regularFont,
+      color: require('pdf-lib').rgb(0, 0, 0),
+    });
+    
+    // Add conference title (UPPERCASE and BOLD)
+    const conferenceUpper = conference_title.toUpperCase();
+    firstPage.drawText(conferenceUpper, {
+      x: width / 2 - (conferenceUpper.length * 4),
+      y: height - 330,
+      size: 16,
+      font: boldFont,
+      color: require('pdf-lib').rgb(0, 0, 0),
+    });
+    
+    // Add "con el proyecto"
+    const projectText = "con el proyecto";
+    firstPage.drawText(projectText, {
+      x: width / 2 - (projectText.length * 2.5),
+      y: height - 360,
+      size: 10,
+      font: regularFont,
+      color: require('pdf-lib').rgb(0, 0, 0),
+    });
+    
+    // Add presentation title (ITALIC)
+    firstPage.drawText(presentation_title, {
+      x: width / 2 - (presentation_title.length * 3),
+      y: height - 390,
+      size: 12,
+      font: italicFont,
+      color: require('pdf-lib').rgb(0, 0, 0),
+    });
+    
+    // Add location and date
+    const formattedDate = formatCostaRicanDate(conference_date);
+    const locationDate = `San Carlos, ${formattedDate}`;
+    firstPage.drawText(locationDate, {
+      x: width / 2 - (locationDate.length * 3),
+      y: height - 450,
+      size: 12,
+      font: regularFont,
+      color: require('pdf-lib').rgb(0, 0, 0),
+    });
+    
+    // Save the PDF
+    const pdfBytes = await pdfDoc.save();
+    
+    // Send the PDF as response
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="certificado_test_${speaker_name.replace(/\s+/g, '_')}.pdf"`);
+    res.send(Buffer.from(pdfBytes));
+    
+  } catch (error) {
+    console.error('Error generating test certificate:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
 });
+
+// Improved author name extraction function
+function extractAuthorNameFromFilename(filename) {
+  try {
+    // Remove extension and "certificado_" prefix
+    let namepart = filename.replace('.pdf', '').replace(/^certificado_/i, '');
+    
+    // Split by underscores
+    let parts = namepart.split('_');
+    
+    // Strategy: Take parts until we hit what looks like a presentation title
+    // Presentation titles often start with capital words like "Ponencia", "Desarrollo", etc.
+    const titleIndicators = ['ponencia', 'desarrollo', 'aplicacion', 'sistema', 'proyecto', 'analisis', 'estudio'];
+    
+    let nameParts = [];
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i].toLowerCase();
+      
+      // If we find a title indicator, stop collecting name parts
+      if (titleIndicators.some(indicator => part.includes(indicator))) {
+        break;
+      }
+      
+      // If we have 4+ name parts already, likely we're into the title
+      if (nameParts.length >= 4) {
+        break;
+      }
+      
+      nameParts.push(parts[i]);
+    }
+    
+    // If we got no name parts or only one, fall back to first 3 parts
+    if (nameParts.length === 0) {
+      nameParts = parts.slice(0, Math.min(3, parts.length));
+    } else if (nameParts.length === 1) {
+      nameParts = parts.slice(0, Math.min(3, parts.length));
+    }
+    
+    return nameParts.join(' ');
+    
+  } catch (error) {
+    console.error('Error extracting author name from filename:', error);
+    return null;
+  }
+}
+
+function normalizeString(str) {
+  return str.toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Remove accents
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// New flexible matching function
+function findBestAuthorMatch(extractedName, expectedAuthors) {
+  console.log(`Trying to match extracted name: "${extractedName}"`);
+  console.log(`Available authors: ${expectedAuthors.map(a => `"${a.name}"`).join(', ')}`);
+  
+  // First try exact match
+  let match = expectedAuthors.find(author => 
+    normalizeString(author.name) === normalizeString(extractedName)
+  );
+  
+  if (match) {
+    console.log(`Found exact match: "${match.name}"`);
+    return match;
+  }
+  
+  // Try partial matching - check if extracted name is contained in any author name
+  match = expectedAuthors.find(author => {
+    const normalizedAuthor = normalizeString(author.name);
+    const normalizedExtracted = normalizeString(extractedName);
+    return normalizedAuthor.includes(normalizedExtracted);
+  });
+  
+  if (match) {
+    console.log(`Found partial match: "${match.name}" contains "${extractedName}"`);
+    return match;
+  }
+  
+  // Try reverse partial matching - check if any author name is contained in extracted name
+  match = expectedAuthors.find(author => {
+    const normalizedAuthor = normalizeString(author.name);
+    const normalizedExtracted = normalizeString(extractedName);
+    return normalizedExtracted.includes(normalizedAuthor);
+  });
+  
+  if (match) {
+    console.log(`Found reverse partial match: "${extractedName}" contains "${match.name}"`);
+    return match;
+  }
+  
+  console.log(`No match found for: "${extractedName}"`);
+  return null;
+}
+
+// Multer configuration for ZIP files
+const zipUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadPath = path.join(__dirname, 'uploads', 'temp');
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      cb(null, `${uniqueSuffix}-${file.originalname}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    // Only allow ZIP files
+    const allowedExtensions = ['.zip'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!allowedExtensions.includes(ext)) {
+      return cb(new Error('Only ZIP files are allowed'));
+    }
+    cb(null, true);
+  }
+});
+
+// Endpoint to generate and download certificates for all speakers in a conference
+app.post('/api/conferences/:id/generate-bulk-certificates', async (req, res) => {
+  try {
+    const conferenceId = req.params.id;
+    
+    // Get conference data
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+    
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+    
+    const conferenceData = conferenceDoc.data();
+    const conferenceTitle = conferenceData.title;
+    
+    // Get all presentations for this conference
+    const presentations = conferenceData.presentations || [];
+    
+    if (presentations.length === 0) {
+      return res.status(400).json({ error: 'No presentations found for this conference' });
+    }
+    
+    console.log(`Processing ${presentations.length} presentations for certificates`);
+    
+    // Path to your PDF template
+    const templatePath = path.join(__dirname, 'uploads', 'Certificate_template', 'Plantilla.pdf');
+    
+    // Check if template exists
+    try {
+      await require('fs').promises.access(templatePath);
+    } catch (error) {
+      return res.status(404).json({ error: 'Certificate template not found at: ' + templatePath });
+    }
+    
+    // Format the Costa Rican date
+    function formatCostaRicanDate(dateString) {
+      const date = new Date(dateString);
+      const months = [
+        'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+        'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre'
+      ];
+      const day = date.getDate();
+      const month = months[date.getMonth()];
+      const year = date.getFullYear();
+      return `${day} de ${month} de ${year}`;
+    }
+    
+    const formattedDate = formatCostaRicanDate(new Date());
+    
+    // Collect all certificates data
+    const certificatesData = [];
+    let totalCertificates = 0;
+    
+    for (const presentationId of presentations) {
+      console.log(`Processing presentation: ${presentationId}`);
+      const presentationRef = db.collection('presentations').doc(presentationId);
+      const presentationDoc = await presentationRef.get();
+      
+      if (!presentationDoc.exists) {
+        console.error(`Presentation ${presentationId} not found`);
+        continue;
+      }
+      
+      const presentationData = presentationDoc.data();
+
+      // Only process presentations with DefinitiveState: true
+      if (presentationData.DefinitiveState !== true) {
+        console.log(`Skipping presentation "${presentationData.title}" - not accepted (DefinitiveState: ${presentationData.DefinitiveState})`);
+        continue;
+      }
+
+      const presentationTitle = presentationData.title;
+      const authors = presentationData.authors || [];
+      
+      console.log(`Presentation "${presentationTitle}" has ${authors.length} authors`);
+      
+      // Generate certificate for each author
+      for (const author of authors) {
+        try {
+          // Extract author name from the author object
+          const authorName = author.name;
+          const authorEmail = author.email;
+          
+          if (!authorName) {
+            console.error(`Author object missing name field:`, author);
+            continue;
+          }
+          
+          console.log(`Generating certificate for: ${authorName} (${authorEmail})`);
+          
+          // Load PDF template
+          const templateBytes = await require('fs').promises.readFile(templatePath);
+          const pdfDoc = await require('pdf-lib').PDFDocument.load(templateBytes);
+          
+          // Get the first page
+          const pages = pdfDoc.getPages();
+          const firstPage = pages[0];
+          const { width, height } = firstPage.getSize();
+          
+          // Embed fonts
+          const boldFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.HelveticaBold);
+          const regularFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.Helvetica);
+          const italicFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.HelveticaOblique);
+          
+          // Add speaker name (CENTERED)
+          const speakerFontSize = 25;
+          const speakerNameWidth = boldFont.widthOfTextAtSize(authorName, speakerFontSize);
+          firstPage.drawText(authorName, {
+            x: (width - speakerNameWidth) / 2 + 15,
+            y: height - 250,
+            size: speakerFontSize,
+            font: boldFont,
+            color: require('pdf-lib').rgb(0, 0, 0),
+          });
+          
+          // Add "por haber participado como ponente en el"
+          const participationText = "por haber participado como ponente en el";
+          firstPage.drawText(participationText, {
+            x: width / 2 - (participationText.length * 2.5) + 20,
+            y: height - 320,
+            size: 12,
+            font: regularFont,
+            color: require('pdf-lib').rgb(0, 0, 0),
+          });
+          
+          // Add conference title (UPPERCASE and BOLD)
+          const conferenceUpper = conferenceTitle.toUpperCase();
+          const conferenceFontSize = 16;
+          const conferenceWidth = boldFont.widthOfTextAtSize(conferenceUpper, conferenceFontSize);
+          firstPage.drawText(conferenceUpper, {
+            x: (width - conferenceWidth) / 2,
+            y: height - 360,
+            size: conferenceFontSize,
+            font: boldFont,
+            color: require('pdf-lib').rgb(0, 0, 0),
+          });
+          
+          // Add "con el proyecto"
+          const projectText = "con el proyecto";
+          firstPage.drawText(projectText, {
+            x: width / 2 - (projectText.length * 2.5),
+            y: height - 400,
+            size: 10,
+            font: regularFont,
+            color: require('pdf-lib').rgb(0, 0, 0),
+          });
+          
+          // Add presentation title (ITALIC)
+          const presentationFontSize = 12;
+          const presentationWidth = italicFont.widthOfTextAtSize(presentationTitle, presentationFontSize);
+          firstPage.drawText(presentationTitle, {
+            x: (width - presentationWidth) / 2,
+            y: height - 430,
+            size: presentationFontSize,
+            font: italicFont,
+            color: require('pdf-lib').rgb(0, 0, 0),
+          });
+          
+          // Add location and date
+          const locationDate = `San Carlos, ${formattedDate}`;
+          const locationFontSize = 12;
+          const locationWidth = regularFont.widthOfTextAtSize(locationDate, locationFontSize);
+          firstPage.drawText(locationDate, {
+            x: (width - locationWidth) / 2,
+            y: height - 490,
+            size: locationFontSize,
+            font: regularFont,
+            color: require('pdf-lib').rgb(0, 0, 0),
+          });
+          
+          // Save the PDF
+          const pdfBytes = await pdfDoc.save();
+          
+          certificatesData.push({
+            authorName: authorName,
+            authorEmail: authorEmail,
+            presentationTitle: presentationTitle,
+            pdfBytes: pdfBytes,
+            filename: `certificado_${authorName.replace(/\s+/g, '_')}_${presentationTitle.replace(/\s+/g, '_').substring(0, 30)}.pdf`
+          });
+          
+          totalCertificates++;
+          console.log(`Certificate generated for ${authorName}`);
+          
+        } catch (error) {
+          console.error(`Error generating certificate for author:`, author, error);
+        }
+      }
+    }
+    
+    if (certificatesData.length === 0) {
+      return res.status(400).json({ error: 'No certificates could be generated' });
+    }
+    
+    // Create zip file with all certificates
+    const JSZip = require('jszip');
+    const zip = new JSZip();
+    
+    // Add each certificate to the zip
+    for (const certData of certificatesData) {
+      zip.file(certData.filename, certData.pdfBytes);
+    }
+    
+    // Generate zip buffer
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+    
+    // Update conference status to mark certificates as generated
+    await conferenceRef.update({
+      certificatesGenerated: true,
+      certificatesGeneratedDate: new Date().toISOString(),
+      certificatesCount: totalCertificates
+    });
+
+    // Send zip file for download
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="certificados_${conferenceTitle.replace(/\s+/g, '_')}.zip"`);
+    res.send(zipBuffer);
+    
+    console.log(`Successfully generated ${totalCertificates} certificates for conference: ${conferenceTitle}`);
+    
+  } catch (error) {
+    console.error('Error generating bulk certificates:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+
+// Endpoint to upload signed certificates for a conference
+app.post('/api/conferences/:id/upload-signed-certificates', zipUpload.single('signedCertificates'), async (req, res) => {
+  try {
+    const conferenceId = req.params.id;
+    
+    if (!req.file) {
+      return res.status(400).json({ error: 'Signed certificates zip file is required' });
+    }
+    
+    if (!req.file.originalname.toLowerCase().endsWith('.zip')) {
+      return res.status(400).json({ error: 'File must be a ZIP archive' });
+    }
+    
+    // Get conference data
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+    
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+    
+    const conferenceData = conferenceDoc.data();
+    const conferenceTitle = conferenceData.title;
+    
+    // Check if unsigned certificates were generated
+    if (!conferenceData.certificatesGenerated) {
+      return res.status(400).json({ error: 'Unsigned certificates must be generated first' });
+    }
+    
+    console.log(`Processing signed certificates upload for conference: ${conferenceTitle}`);
+    
+    // Read and extract the uploaded zip
+    const JSZip = require('jszip');
+    const zipBuffer = await require('fs').promises.readFile(req.file.path);
+    const zip = await JSZip.loadAsync(zipBuffer);
+    
+    // Clean up the temporary file
+    require('fs').unlink(req.file.path, (err) => {
+      if (err) console.error('Error deleting temp file:', err);
+    });
+    
+    // Get all presentations and their authors for this conference
+    const presentations = conferenceData.presentations || [];
+    const expectedAuthors = [];
+    
+    for (const presentationId of presentations) {
+      const presentationRef = db.collection('presentations').doc(presentationId);
+      const presentationDoc = await presentationRef.get();
+      
+      if (presentationDoc.exists) {
+        const presentationData = presentationDoc.data();
+        // Only include presentations with DefinitiveState: true
+        if (presentationData.DefinitiveState === true) {
+          const authors = presentationData.authors || [];
+          const creationId = String(presentationData.creationId); // Convert to string
+          
+          authors.forEach(author => {
+            // Extract name and email from author object
+            const authorName = author.name;
+            const authorEmail = author.email;
+            
+            if (authorName) { // Only add if name exists
+              expectedAuthors.push({
+                name: authorName,
+                email: authorEmail,
+                presentationId: presentationId,
+                presentationTitle: presentationData.title,
+                creationId: creationId
+              });
+            } else {
+              console.error(`Author object missing name field:`, author);
+            }
+          });
+        }
+      }
+    }
+    
+    if (expectedAuthors.length === 0) {
+      return res.status(400).json({ error: 'No accepted presentations with authors found' });
+    }
+    
+    console.log(`Expected authors: ${expectedAuthors.length}`);
+    expectedAuthors.forEach(author => {
+      console.log(`  - ${author.name} (${author.email}) - ${author.presentationTitle}`);
+    });
+    
+    // Process each file in the ZIP
+    const processedCertificates = [];
+    const errors = [];
+    
+    for (const [filename, fileData] of Object.entries(zip.files)) {
+      if (fileData.dir || !filename.toLowerCase().endsWith('.pdf')) {
+        continue; // Skip directories and non-PDF files
+      }
+      
+      console.log(`Processing file: ${filename}`);
+      
+      // Extract author name from filename
+      const authorName = extractAuthorNameFromFilename(filename);
+      
+      if (!authorName) {
+        errors.push(`Could not extract author name from filename: ${filename}`);
+        continue;
+      }
+      
+      // Find matching author using improved matching
+      const matchingAuthor = findBestAuthorMatch(authorName, expectedAuthors);
+      
+      if (!matchingAuthor) {
+        errors.push(`No matching author found for: ${authorName} (from file: ${filename})`);
+        continue;
+      }
+      
+      try {
+        // Save the signed certificate to the presentation's folder
+        const certificatePath = path.join(
+          __dirname, 
+          'uploads', 
+          conferenceId, 
+          String(matchingAuthor.creationId), // Ensure it's a string
+          'certificates', 
+          'signed'
+        );
+        
+        // Ensure directory exists
+        await require('fs').promises.mkdir(certificatePath, { recursive: true });
+        
+        // Save the file
+        const fileBuffer = await fileData.async('nodebuffer');
+        const savedFileName = `certificado_${matchingAuthor.name.replace(/\s+/g, '_')}_signed.pdf`;
+        const savedFilePath = path.join(certificatePath, savedFileName);
+        
+        await require('fs').promises.writeFile(savedFilePath, fileBuffer);
+        
+        processedCertificates.push({
+          authorName: matchingAuthor.name,
+          authorEmail: matchingAuthor.email,
+          presentationId: matchingAuthor.presentationId,
+          presentationTitle: matchingAuthor.presentationTitle,
+          creationId: matchingAuthor.creationId,
+          originalFilename: filename,
+          savedPath: savedFilePath,
+          relativePath: `uploads/${conferenceId}/${matchingAuthor.creationId}/certificates/signed/${savedFileName}`
+        });
+        
+        console.log(`Saved certificate for ${matchingAuthor.name} (${matchingAuthor.email}) - matched from ${authorName}`);
+        
+      } catch (saveError) {
+        console.error(`Error saving certificate for ${authorName}:`, saveError);
+        errors.push(`Failed to save certificate for ${authorName}: ${saveError.message}`);
+      }
+    }
+    
+    // Update database with certificate information
+    for (const cert of processedCertificates) {
+      try {
+        const presentationRef = db.collection('presentations').doc(cert.presentationId);
+        const presentationDoc = await presentationRef.get();
+        
+        if (presentationDoc.exists) {
+          const presentationData = presentationDoc.data();
+          const certificates = presentationData.certificates || {};
+          const authorsWithCertificates = certificates.authorsWithCertificates || [];
+          
+          // Find and update the author's certificate info
+          const authorIndex = authorsWithCertificates.findIndex(a => 
+            normalizeString(a.authorName) === normalizeString(cert.authorName)
+          );
+          
+          if (authorIndex !== -1) {
+            authorsWithCertificates[authorIndex].signedFile = cert.relativePath;
+            authorsWithCertificates[authorIndex].signedUploadDate = new Date().toISOString();
+            authorsWithCertificates[authorIndex].authorEmail = cert.authorEmail;
+          } else {
+            // Add new author certificate record
+            authorsWithCertificates.push({
+              authorName: cert.authorName,
+              authorEmail: cert.authorEmail,
+              unsignedFile: null,
+              signedFile: cert.relativePath,
+              signedUploadDate: new Date().toISOString(),
+              certificateSent: false
+            });
+          }
+          
+          // Update the presentation document
+          await presentationRef.update({
+            'certificates.authorsWithCertificates': authorsWithCertificates,
+            'certificates.signedUploaded': true,
+            'certificates.signedUploadDate': new Date().toISOString()
+          });
+        }
+      } catch (updateError) {
+        console.error(`Error updating database for ${cert.authorName}:`, updateError);
+        errors.push(`Failed to update database for ${cert.authorName}`);
+      }
+    }
+    
+    // Update conference status
+    await conferenceRef.update({
+      signedCertificatesUploaded: true,
+      signedCertificatesUploadDate: new Date().toISOString(),
+      signedCertificatesCount: processedCertificates.length
+    });
+    
+    res.status(200).json({
+      message: `Signed certificates uploaded successfully`,
+      processedCount: processedCertificates.length,
+      expectedCount: expectedAuthors.length,
+      processedCertificates: processedCertificates.map(c => ({
+        authorName: c.authorName,
+        authorEmail: c.authorEmail,
+        presentationTitle: c.presentationTitle
+      })),
+      errors: errors.length > 0 ? errors : undefined
+    });
+    
+  } catch (error) {
+    console.error('Error uploading signed certificates:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Endpoint to send certificates via email to speakers
+app.post('/api/conferences/:id/send-certificates', async (req, res) => {
+  try {
+    const conferenceId = req.params.id;
+    
+    // Get conference data
+    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    const conferenceDoc = await conferenceRef.get();
+    
+    if (!conferenceDoc.exists) {
+      return res.status(404).json({ error: 'Conference not found' });
+    }
+    
+    const conferenceData = conferenceDoc.data();
+    const conferenceTitle = conferenceData.title;
+    
+    // Check if signed certificates were uploaded
+    if (!conferenceData.signedCertificatesUploaded) {
+      return res.status(400).json({ error: 'Signed certificates must be uploaded first' });
+    }
+    
+    console.log(`Sending certificates via email for conference: ${conferenceTitle}`);
+    
+    // Get all presentations and their authors for this conference
+    const presentations = conferenceData.presentations || [];
+    const emailsToSend = [];
+    const errors = [];
+    
+    for (const presentationId of presentations) {
+      const presentationRef = db.collection('presentations').doc(presentationId);
+      const presentationDoc = await presentationRef.get();
+      
+      if (presentationDoc.exists) {
+        const presentationData = presentationDoc.data();
+        
+        // Only send to accepted presentations
+        if (presentationData.DefinitiveState === true) {
+          const authors = presentationData.authors || [];
+          const creationId = String(presentationData.creationId);
+          
+          for (const author of authors) {
+            const authorName = author.name;
+            const authorEmail = author.email;
+            
+            if (authorName && authorEmail) {
+              // Find the signed certificate path
+              const certificates = presentationData.certificates || {};
+              const authorsWithCertificates = certificates.authorsWithCertificates || [];
+              
+              const authorCert = authorsWithCertificates.find(a => 
+                normalizeString(a.authorName) === normalizeString(authorName)
+              );
+              
+              if (authorCert && authorCert.signedFile) {
+                const certificatePath = path.join(__dirname, authorCert.signedFile);
+                
+                // Check if certificate file exists
+                try {
+                  await require('fs').promises.access(certificatePath);
+                  
+                  emailsToSend.push({
+                    authorName: authorName,
+                    authorEmail: authorEmail,
+                    presentationTitle: presentationData.title,
+                    certificatePath: certificatePath,
+                    presentationId: presentationId
+                  });
+                } catch (fileError) {
+                  errors.push(`Certificate file not found for ${authorName}: ${certificatePath}`);
+                }
+              } else {
+                errors.push(`No signed certificate found for ${authorName}`);
+              }
+            } else {
+              errors.push(`Missing name or email for author in presentation ${presentationData.title}`);
+            }
+          }
+        }
+      }
+    }
+    
+    if (emailsToSend.length === 0) {
+      return res.status(400).json({ error: 'No certificates available to send', details: errors });
+    }
+    
+    console.log(`Preparing to send ${emailsToSend.length} certificates via email`);
+    
+    // Send emails
+    let sentCount = 0;
+    const emailErrors = [];
+    
+    for (const emailData of emailsToSend) {
+      try {
+        const emailSubject = `Certificado de Participación - ${conferenceTitle}`;
+        const emailBody = `
+        Estimado/a ${emailData.authorName},
+        
+        Nos complace enviarle su certificado de participación como ponente en la conferencia "${conferenceTitle}".
+        
+        Su ponencia "${emailData.presentationTitle}" fue aceptada y presentada exitosamente.
+        
+        Adjunto encontrará su certificado firmado digitalmente.
+        
+        ¡Felicitaciones por su participación!
+        
+        Saludos cordiales,
+        Equipo Organizador
+        ProSTEM - TEC
+        `;
+        
+        // Send email with certificate attachment
+        const mailOptions = {
+          from: 'prostem.itcr@gmail.com',
+          to: emailData.authorEmail,
+          subject: emailSubject,
+          text: emailBody,
+          attachments: [
+            {
+              filename: `certificado_${emailData.authorName.replace(/\s+/g, '_')}.pdf`,
+              path: emailData.certificatePath
+            }
+          ]
+        };
+        
+        await transporter.sendMail(mailOptions);
+        sentCount++;
+        
+        // Update database to mark certificate as sent
+        const presentationRef = db.collection('presentations').doc(emailData.presentationId);
+        const presentationDoc = await presentationRef.get();
+        
+        if (presentationDoc.exists) {
+          const presentationData = presentationDoc.data();
+          const certificates = presentationData.certificates || {};
+          const authorsWithCertificates = certificates.authorsWithCertificates || [];
+          
+          const authorIndex = authorsWithCertificates.findIndex(a => 
+            normalizeString(a.authorName) === normalizeString(emailData.authorName)
+          );
+          
+          if (authorIndex !== -1) {
+            authorsWithCertificates[authorIndex].certificateSent = true;
+            authorsWithCertificates[authorIndex].sentDate = new Date().toISOString();
+            
+            await presentationRef.update({
+              'certificates.authorsWithCertificates': authorsWithCertificates
+            });
+          }
+        }
+        
+        console.log(`Certificate sent to ${emailData.authorName} (${emailData.authorEmail})`);
+        
+      } catch (emailError) {
+        console.error(`Error sending certificate to ${emailData.authorName}:`, emailError);
+        emailErrors.push(`Failed to send certificate to ${emailData.authorName} (${emailData.authorEmail}): ${emailError.message}`);
+      }
+    }
+    
+    // Update conference status
+    await conferenceRef.update({
+      certificatesSent: true,
+      certificatesSentDate: new Date().toISOString(),
+      certificatesSentCount: sentCount
+    });
+    
+    res.status(200).json({
+      message: `Certificates sent successfully`,
+      sentCount: sentCount,
+      totalCount: emailsToSend.length,
+      sentCertificates: emailsToSend.slice(0, sentCount).map(e => ({
+        authorName: e.authorName,
+        authorEmail: e.authorEmail,
+        presentationTitle: e.presentationTitle
+      })),
+      errors: [...errors, ...emailErrors]
+    });
+    
+  } catch (error) {
+    console.error('Error sending certificates:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Multer configuration for news images
+const newsImageUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      // We'll create the directory based on newsId in the endpoint
+      cb(null, path.join(__dirname, 'uploads', 'temp'));
+    },
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      cb(null, `${uniqueSuffix}-${file.originalname}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files (JPEG, PNG, GIF) are allowed'));
+    }
+  },
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit per image
+  }
+});
+
+// Endpoint to create a new news item
+app.post('/api/news', newsImageUpload.array('images', 10), async (req, res) => {
+  try {
+    const { title, content, creatorId } = req.body;
+    
+    if (!title || !content || !creatorId) {
+      return res.status(400).json({ error: 'Title, content and creatorId are required' });
+    }
+
+    // Create the news document in Firestore first to get the ID
+    const newsRef = db.collection('news').doc();
+    const newsId = newsRef.id;
+
+    // Create the directory for this news item
+    const newsImagesDir = path.join(__dirname, 'uploads', 'newsModule', newsId, 'images');
+    await require('fs').promises.mkdir(newsImagesDir, { recursive: true });
+
+    // Process uploaded images
+    const imageLinks = [];
+    
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        // Move file from temp to news directory
+        const fileName = `${Date.now()}-${file.originalname}`;
+        const newPath = path.join(newsImagesDir, fileName);
+        
+        await require('fs').promises.rename(file.path, newPath);
+        
+        // Store relative path
+        const relativePath = `uploads/newsModule/${newsId}/images/${fileName}`;
+        imageLinks.push(relativePath);
+      }
+    }
+
+    // Get current date and time
+    const now = new Date();
+    const creationDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    const creationTime = now.toTimeString().split(' ')[0]; // HH:MM:SS
+
+    // Save news data to Firestore
+    const newsData = {
+      title,
+      content,
+      creatorId,
+      creationDate,
+      creationTime,
+      imageLinks,
+      createdAt: now.toISOString() // For sorting purposes
+    };
+
+    await newsRef.set(newsData);
+
+    res.status(201).json({
+      message: 'News created successfully',
+      newsId: newsId,
+      news: { id: newsId, ...newsData }
+    });
+
+  } catch (error) {
+    console.error('Error creating news:', error);
+    
+    // Clean up temp files if error occurs
+    if (req.files) {
+      req.files.forEach(file => {
+        require('fs').unlink(file.path, (err) => {
+          if (err) console.error('Error deleting temp file:', err);
+        });
+      });
+    }
+
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Endpoint to get all news items ordered by creation date (newest first)
+app.get('/api/news', async (req, res) => {
+  try {
+    const newsSnapshot = await db.collection('news')
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const newsList = [];
+    newsSnapshot.forEach(doc => {
+      newsList.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
+    res.status(200).json(newsList);
+
+  } catch (error) {
+    console.error('Error fetching news:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+app.get('/uploads/newsModule/:newsId/images/:imageName', (req, res) => {
+  const { newsId, imageName } = req.params;
+  const imagePath = path.join(__dirname, 'uploads', 'newsModule', newsId, 'images', imageName);
+  
+  console.log('Requested image path:', imagePath);
+  
+  // Check if file exists
+  require('fs').access(imagePath, require('fs').constants.F_OK, (err) => {
+    if (err) {
+      console.log('Image not found:', imagePath);
+      return res.status(404).json({ error: 'Image not found' });
+    }
+    
+    // Detect MIME type based on file extension
+    const ext = path.extname(imageName).toLowerCase();
+    let contentType = 'image/jpeg'; // default
+    
+    switch (ext) {
+      case '.png':
+        contentType = 'image/png';
+        break;
+      case '.gif':
+        contentType = 'image/gif';
+        break;
+      case '.jpg':
+      case '.jpeg':
+        contentType = 'image/jpeg';
+        break;
+    }
+    
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Access-Control-Allow-Origin', '*'); // Allow CORS
+    
+    console.log('Serving image:', imagePath, 'with type:', contentType);
+    res.sendFile(imagePath);
+  });
+});
+
+// Endpoint to get a single news item by ID
+app.get('/api/news/:id', async (req, res) => {
+  try {
+    const newsId = req.params.id;
+    const newsDoc = await db.collection('news').doc(newsId).get();
+
+    if (!newsDoc.exists) {
+      return res.status(404).json({ error: 'News not found' });
+    }
+
+    res.status(200).json({
+      id: newsDoc.id,
+      ...newsDoc.data()
+    });
+
+  } catch (error) {
+    console.error('Error fetching news by ID:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+
+
+
 //#################################################################################################
 
 app.listen(PORT, (error) => {
