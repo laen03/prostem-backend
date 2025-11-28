@@ -1730,38 +1730,49 @@ app.post("/api/conferences/:id", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Get the list of conference IDs managed by the user
-    const conferencesManager = userDoc.get("conferencesManager") || [];
-    let highestCreationId = 0;
+    // Get ALL conferences in the system to find the highest creationId globally
+    const allConferencesSnapshot = await db.collection("conferences").get();
+    let highestNumericId = 0;
 
-    // Iterate through the conferences to find the highest creationId
-    for (const conferenceId of conferencesManager) {
-      const conferenceDoc = await db.collection("conferences").doc(conferenceId).get();
-      if (conferenceDoc.exists) {
-        const creationId = conferenceDoc.get("creationId") || 0; // Default to 0 if creationId is missing
-        if (creationId > highestCreationId) {
-          highestCreationId = creationId; // Keep track of the highest creationId
+    // Iterate through ALL conferences to find the highest numeric ID
+    allConferencesSnapshot.forEach((doc) => {
+      if (doc.exists) {
+        const creationId = doc.get("creationId") || "C000";
+        // Extract numeric part from format like "C001", "C002"
+        if (typeof creationId === 'string' && creationId.startsWith('C')) {
+          const numericPart = parseInt(creationId.substring(1));
+          if (numericPart > highestNumericId) {
+            highestNumericId = numericPart;
+          }
+        } else if (typeof creationId === 'number') {
+          // Handle legacy numeric creationIds
+          if (creationId > highestNumericId) {
+            highestNumericId = creationId;
+          }
         }
       }
-    }
+    });
 
-    // Increment the highest creationId by 1
-    const newCreationId = highestCreationId + 1; // If highest is 4, newCreationId will be 5
+    // Increment the highest numeric ID by 1
+    const newNumericId = highestNumericId + 1;
+
+    // Generate formatted conference code (C001, C002, etc.)
+    const newCreationId = `C${newNumericId.toString().padStart(3, '0')}`;
 
     // Add the new conference data
     const newConferenceData = {
       ...data,
       managerId: managerId,
-      creationId: newCreationId, // Assign the calculated creationId
-      resultsSent: 0,            // Updated field name
+      creationId: newCreationId,     // Formatted ID stored in creationId field (C001, C002, etc.)
+      resultsSent: 0,
       finalResults: false,
       presentations: []
     };
 
     const newConference = await conferencesDB.add(newConferenceData);
 
-    // Create a folder in the uploads directory with the ID of the new conference
-    const uploadPath = path.join(__dirname, "uploads", newConference.id);
+    // Create a folder in the uploads/conferences directory with the creationId of the new conference
+    const uploadPath = path.join(__dirname, "uploads", "conferences", newCreationId);
     if (!fs.existsSync(uploadPath)) {
       fs.mkdirSync(uploadPath, { recursive: true });
     }
@@ -1769,13 +1780,13 @@ app.post("/api/conferences/:id", async (req, res) => {
     // Update the user's conferencesManager field
     await userRef.update({
       conferencesManager: admin.firestore.FieldValue.arrayUnion(newConference.id),
-    });
+  });
 
-    res.status(201).json({ id: newConference.id, ...newConferenceData });
-  } catch (error) {
-    console.error("Error creating conference:", error);
-    res.status(500).json({ error: error.message });
-  }
+  res.status(201).json({ id: newConference.id, ...newConferenceData });
+    } catch (error) {
+      console.error("Error creating conference:", error);
+      res.status(500).json({ error: error.message });
+    }
 });
 
 // Endpoint to get all conferences for a specific user, ordered by creationId
@@ -2209,27 +2220,40 @@ app.put("/api/conferences/:id", async (req, res) => {
 })
 
 
-// Endpoint to get all conferences excluding those created by the current user
 app.get("/api/conferences", async (req, res) => {
   const userId = req.query.userId;
+  console.log('Received userId:', userId);
 
   if (!userId) {
-    return res.status(400).json({ error: "User ID is required" });
+    return res.status(400).json({ error: 'userId is required' });
   }
 
   try {
-    const data = await conferencesDB.get();
-    const conferences = data.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(conference => conference.managerId !== userId); // Exclude conferences created by the user
+    const conferencesSnapshot = await db.collection('conferences').get();
 
+    const conferences = [];
+    conferencesSnapshot.forEach(doc => {
+      const data = doc.data();
+      
+      // FIXED: Use 'userId' field instead of 'creator-id'
+      console.log(`Conference ${doc.id}: userId=${data.userId}, currentUser=${userId}, resultsSent=${data.resultsSent}`);
+      
+      // Apply filters: exclude user's own conferences AND only show conferences with resultsSent = 0
+      if (data.userId !== userId && data.resultsSent === 0) {
+        conferences.push({
+          id: doc.id,
+          ...data
+        });
+      }
+    });
+
+    console.log(`Filtered conferences: ${conferences.length}`);
     res.status(200).json(conferences);
   } catch (error) {
-    console.error("Error fetching conferences:", error);
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching conferences:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
-
 
 
 //Endpoint to get all presentations in general
@@ -2275,12 +2299,18 @@ app.get("/api/conferences/presentations/:id", async (req, res) => {
 })
 
 // Endpoint to download a document by conferenceId and creationId
-app.get('/api/presentations/:conferenceId/:creationId/download', async (req, res) => {
+app.get('/api/presentations/:conferenceCreationId/:presentationCreationId/download', async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
 
-    // Construct the file path
-    const documentFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    // Construct the file path using the new structure: uploads/conferences/conferenceCreationId/presentationCreationId
+    const documentFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
+    
+    // Check if the folder exists
+    if (!fs.existsSync(documentFolderPath)) {
+      return res.status(404).json({ error: 'Document folder not found' });
+    }
+
     const files = fs.readdirSync(documentFolderPath);
 
     // Find the general document in the folder
@@ -2291,8 +2321,8 @@ app.get('/api/presentations/:conferenceId/:creationId/download', async (req, res
 
     const filePath = path.join(documentFolderPath, generalDocument);
 
-    // Send the file to the client
-    res.download(filePath, generalDocument); // This triggers a file download
+    // Send the file to the client for download
+    res.download(filePath);
   } catch (error) {
     console.error('Error downloading document:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -2300,13 +2330,43 @@ app.get('/api/presentations/:conferenceId/:creationId/download', async (req, res
 });
 
 // Endpoint to view a document by conferenceId and creationId
-app.get('/api/presentations/:conferenceId/:creationId/view', async (req, res) => {
+app.get('/api/presentations/:conferenceCreationId/:presentationCreationId/view', async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
 
-    // Construct the file path
-    const documentFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    console.log('=== DEBUG VIEW DOCUMENT ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
+
+    // Construct the file path using the new structure: uploads/conferences/conferenceCreationId/presentationCreationId
+    const documentFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
+    
+    console.log('Looking for folder at:', documentFolderPath);
+    console.log('Folder exists:', fs.existsSync(documentFolderPath));
+
+    // Let's also check what's actually in the uploads/conferences folder
+    const conferencesPath = path.join(__dirname, 'uploads', 'conferences');
+    if (fs.existsSync(conferencesPath)) {
+      console.log('Conferences folder contents:', fs.readdirSync(conferencesPath));
+      
+      // Check if the conference folder exists
+      const confFolderPath = path.join(conferencesPath, conferenceCreationId);
+      if (fs.existsSync(confFolderPath)) {
+        console.log(`Conference ${conferenceCreationId} folder contents:`, fs.readdirSync(confFolderPath));
+      } else {
+        console.log(`Conference folder ${conferenceCreationId} does NOT exist`);
+      }
+    } else {
+      console.log('Conferences folder does NOT exist');
+    }
+    
+    // Check if the folder exists
+    if (!fs.existsSync(documentFolderPath)) {
+      return res.status(404).json({ error: 'Document folder not found' });
+    }
+
     const files = fs.readdirSync(documentFolderPath);
+    console.log('Files in folder:', files);
 
     // Find the general document in the folder
     const generalDocument = files.find(file => file.startsWith('general-'));
@@ -2315,6 +2375,7 @@ app.get('/api/presentations/:conferenceId/:creationId/view', async (req, res) =>
     }
 
     const filePath = path.join(documentFolderPath, generalDocument);
+    console.log('Final file path:', filePath);
 
     // Send the file to the client for viewing
     res.sendFile(filePath);
@@ -2859,10 +2920,10 @@ app.post('/api/revision-forms', async (req, res) => {
   }
 });
 
-// Endpoint to find reviewers by presentation area (from the users collection)
+// Endpoint to find reviewers by presentation area (optimized with batch query)
 app.get('/api/reviewers-by-presentation/:presentationId', async (req, res) => {
   const { presentationId } = req.params;
-  const { area } = req.query; // Get the area from query parameter
+  const { area } = req.query;
 
   if (!presentationId) {
     return res.status(400).json({ error: 'Presentation ID is required' });
@@ -2873,83 +2934,111 @@ app.get('/api/reviewers-by-presentation/:presentationId', async (req, res) => {
     const presentationDoc = await db.collection('presentations').doc(presentationId).get();
 
     if (!presentationDoc.exists) {
-      console.log(`Presentation with ID ${presentationId} not found.`);
       return res.status(404).json({ error: 'Presentation not found' });
     }
 
     const presentationData = presentationDoc.data();
-    const presentationArea = presentationData.area; // Get the area of the presentation
+    const currentConferenceId = presentationData['conference-id'];
+    const targetArea = area;
     
-    // FIXED: Use the area parameter directly, don't default to presentation area
-    const targetArea = area; // Use ONLY the provided area parameter
-    
-    console.log(`Target area for search: "${targetArea}"`); // DEBUG
-    console.log(`Presentation area: "${presentationArea}"`); // DEBUG
-
-    // Query the users collection for reviewers with matching areas
+    // Get all reviewers
     const usersQuery = await db.collection('users')
-      .where('reviewer', '==', true) // Only fetch users with reviewer set to true
+      .where('reviewer', '==', true)
       .get();
 
     if (usersQuery.empty) {
-      console.log('No reviewers found with reviewer field set to true.');
       return res.status(404).json({ error: 'No reviewers found' });
     }
 
-    const reviewers = [];
-
+    // Collect all presentation IDs from all reviewers
+    const allPresentationIds = new Set();
+    const reviewerData = [];
+    
     usersQuery.forEach((doc) => {
       const userData = doc.data();
-      console.log(`Checking user ${doc.id}:`, { 
-        specializations: userData.specializations, 
-        areas: userData.areas 
-      }); // DEBUG
+      const assignedPresentations = userData.presentationsAssigned || [];
+      
+      // Collect presentation IDs for batch query
+      assignedPresentations.forEach(assignment => {
+        if (assignment.presentationId) {
+          allPresentationIds.add(assignment.presentationId);
+        }
+      });
+      
+      reviewerData.push({
+        id: doc.id,
+        data: userData,
+        assignedPresentations
+      });
+    });
 
-      // FIXED: If area is "Todas las áreas" OR no area specified, include ALL reviewers
+    // Batch query all presentations at once
+    const presentationPromises = Array.from(allPresentationIds).map(id => 
+      db.collection('presentations').doc(id).get()
+    );
+    
+    const presentationDocs = await Promise.all(presentationPromises);
+    
+    // Create a map of presentation ID to conference ID
+    const presentationToConference = {};
+    presentationDocs.forEach((doc, index) => {
+      if (doc.exists) {
+        const presentationId = Array.from(allPresentationIds)[index];
+        presentationToConference[presentationId] = doc.data()['conference-id'];
+      }
+    });
+
+    // Process reviewers with cached data
+    const reviewers = [];
+    
+    reviewerData.forEach(reviewer => {
+      const userData = reviewer.data;
+      
+      // Count conference-specific presentations using cached data
+      let conferenceSpecificCount = 0;
+      reviewer.assignedPresentations.forEach(assignment => {
+        const confId = presentationToConference[assignment.presentationId];
+        if (confId === currentConferenceId) {
+          conferenceSpecificCount++;
+        }
+      });
+
+      // Apply area filtering
       if (!targetArea || targetArea === 'Todas las áreas') {
         reviewers.push({
-          id: doc.id,
-          name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
+          id: reviewer.id,
+          name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`,
           email: userData.email,
           institution: userData.institution,
-          presentationsAssigned: userData.presentationsAssigned?.length || 0, // Count of assigned presentations
-          isAssigned: userData.conferencesAssigned?.includes(presentationData['conference-id']) || false, // Check if the user is assigned to the conference
-          specializations: userData.specializations || [], // Keep specializations array
-          matchingArea: presentationArea, // Add the original presentation area as matching area
+          presentationsAssigned: conferenceSpecificCount,
+          isAssigned: userData.conferencesAssigned?.includes(currentConferenceId) || false,
+          specializations: userData.specializations || [],
+          matchingArea: presentationData.area,
         });
-        console.log(`User ${doc.id} included (all areas)`); // DEBUG
       } else {
-        // Only filter by specific area if it's NOT "Todas las áreas"
         const userAreas = userData.specializations || userData.areas || [];
-        
         if (Array.isArray(userAreas) && userAreas.includes(targetArea)) {
-          // Ensure the target area is the first element in the specializations array
           const specializations = [...userAreas];
           const index = specializations.indexOf(targetArea);
           if (index > -1) {
-            specializations.splice(index, 1); // Remove the matching area
-            specializations.unshift(targetArea); // Add it to the beginning
+            specializations.splice(index, 1);
+            specializations.unshift(targetArea);
           }
 
           reviewers.push({
-            id: doc.id,
-            name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`, // Combine name fields
+            id: reviewer.id,
+            name: `${userData.name} ${userData.lastName1} ${userData.lastName2}`,
             email: userData.email,
             institution: userData.institution,
-            presentationsAssigned: userData.presentationsAssigned?.length || 0, // Count of assigned presentations
-            isAssigned: userData.conferencesAssigned?.includes(presentationData['conference-id']) || false, // Check if the user is assigned to the conference
-            specializations, // Include the areas array (but keep the property name as specializations for frontend compatibility)
-            matchingArea: targetArea, // Add the matching area
+            presentationsAssigned: conferenceSpecificCount,
+            isAssigned: userData.conferencesAssigned?.includes(currentConferenceId) || false,
+            specializations,
+            matchingArea: targetArea,
           });
-          
-          console.log(`User ${doc.id} matches area "${targetArea}"`); // DEBUG
-        } else {
-          console.log(`User ${doc.id} does not match area "${targetArea}" - has areas:`, userAreas); // DEBUG
         }
       }
     });
 
-    console.log(`Found ${reviewers.length} reviewers for area "${targetArea || 'all areas'}"`); // DEBUG
     res.status(200).json({ reviewers });
   } catch (error) {
     console.error('Error fetching reviewers:', error);
@@ -3982,13 +4071,24 @@ app.post('/api/presentations', fileUpload.fields([
   { name: 'generalDocument', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { userId, conferenceId, title, summary, area, ...otherFields } = req.body;
+    const { userId, conferenceId, title, summary, area, authors, ...otherFields } = req.body;
 
     if (!userId || !conferenceId || !title || !summary || !area) {
       return res.status(400).json({ error: 'userId, conferenceId, title, description, and area are required' });
     }
 
-    // Paso 1: Obtener el highest creationId de las presentaciones de la conferencia
+    // Parse authors from JSON string to array of objects
+    let parsedAuthors = [];
+    if (authors) {
+      try {
+        parsedAuthors = JSON.parse(authors);
+      } catch (error) {
+        console.error('Error parsing authors JSON:', error);
+        return res.status(400).json({ error: 'Invalid authors format' });
+      }
+    }
+
+    // Paso 1: Obtener la conferencia y su creationId
     const conferenceRef = db.collection('conferences').doc(conferenceId);
     const conferenceDoc = await conferenceRef.get();
 
@@ -3997,6 +4097,7 @@ app.post('/api/presentations', fileUpload.fields([
     }
 
     const conferenceData = conferenceDoc.data();
+    const conferenceCreationId = conferenceData.creationId; // Get conference creationId
     const presentations = conferenceData.presentations || [];
     let highestCreationId = 0;
 
@@ -4004,7 +4105,7 @@ app.post('/api/presentations', fileUpload.fields([
     for (const presentationId of presentations) {
       const presentationDoc = await db.collection('presentations').doc(presentationId).get();
       if (presentationDoc.exists) {
-        const creationId = presentationDoc.get('creationId') || 0; // Default to 0 if creationId is missing
+        const creationId = presentationDoc.get('creationId') || 0;
         if (creationId > highestCreationId) {
           highestCreationId = creationId;
         }
@@ -4013,6 +4114,9 @@ app.post('/api/presentations', fileUpload.fields([
 
     // Incrementar el highest creationId en 1
     const newCreationId = highestCreationId + 1;
+
+    // Generate formatted presentation code (C001-P001, C001-P002, etc.)
+    const presentationCode = `${conferenceCreationId}-P${newCreationId.toString().padStart(3, '0')}`;
 
     // Paso 2: Crear la ponencia sin los documentos
     const presentationRef = db.collection('presentations').doc();
@@ -4026,7 +4130,8 @@ app.post('/api/presentations', fileUpload.fields([
       title,
       summary,
       area, 
-      creationId: newCreationId, 
+      authors: parsedAuthors, // Store as proper array of objects
+      creationId: presentationCode, // Store formatted code (C001-P001, etc.)
       paid: false, 
       reviewed: false, 
       createdAt: currentDate, 
@@ -4038,13 +4143,13 @@ app.post('/api/presentations', fileUpload.fields([
     await presentationRef.set(presentationData);
 
     // Paso 3: Verificar si existe la carpeta de la conferencia
-    const conferenceFolderPath = path.join(__dirname, 'uploads', conferenceId);
+    const conferenceFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId);
     if (!fs.existsSync(conferenceFolderPath)) {
-      return res.status(400).json({ error: `The folder for conference ${conferenceId} does not exist.` });
+      return res.status(400).json({ error: `The folder for conference ${conferenceCreationId} does not exist.` });
     }
 
-    // Crear una subcarpeta con el creationId dentro de la carpeta de la conferencia
-    const presentationFolderPath = path.join(conferenceFolderPath, `${newCreationId}`);
+    // Crear una subcarpeta con el presentationCode dentro de la carpeta de la conferencia
+    const presentationFolderPath = path.join(conferenceFolderPath, presentationCode);
     if (!fs.existsSync(presentationFolderPath)) {
       fs.mkdirSync(presentationFolderPath, { recursive: true });
     }
@@ -4059,7 +4164,7 @@ app.post('/api/presentations', fileUpload.fields([
     // Generar la ruta del archivo dentro de la subcarpeta
     const generalDocumentPath = path.join(presentationFolderPath, `general-${generalDocument.originalname}`);
 
-    // Renombrar y mover el archivo al directorio de uploads/conferenceId/creationId
+    // Renombrar y mover el archivo al directorio de uploads/conferences/conferenceCreationId/presentationCode
     fs.renameSync(
       path.join(__dirname, 'uploads', generalDocument.filename),
       generalDocumentPath
@@ -4067,7 +4172,7 @@ app.post('/api/presentations', fileUpload.fields([
 
     // Guardar la ruta relativa en la base de datos
     await presentationRef.update({
-      generalDocumentPath: `/uploads/${conferenceId}/${newCreationId}/general-${generalDocument.originalname}`
+      generalDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCode}/general-${generalDocument.originalname}`
     });
 
     // Paso 5: Actualizar el documento del usuario
@@ -4103,11 +4208,12 @@ app.post('/api/presentations', fileUpload.fields([
     res.status(201).json({
       message: 'Presentation created successfully',
       presentationId,
-      creationId: newCreationId, // Devolver el nuevo creationId
-      paid: false, // Return the initial value of paid
-      reviewed: false, // Return the initial value of reviewed
-      lastModified: currentDate, // Return the lastModified date
-      generalDocumentPath: `/uploads/${conferenceId}/${newCreationId}/general-${generalDocument.originalname}`
+      creationId: presentationCode,
+      paid: false,
+      reviewed: false,
+      lastModified: currentDate,
+      generalDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCode}/general-${generalDocument.originalname}`,
+      authors: parsedAuthors // Return the parsed authors for confirmation
     });
   } catch (error) {
     console.error('Error creating presentation:', error);
@@ -4116,12 +4222,19 @@ app.post('/api/presentations', fileUpload.fields([
 });
 
 // Endpoint to upload a corrected version of the document
-app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUpload.fields([
+app.post('/api/presentations/:conferenceCreationId/:presentationCreationId/upload-corrected', fileUpload.fields([
   { name: 'correctedDocument', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
     const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+
+    // ADD MORE DEBUG LOGS
+    console.log('=== BACKEND DEBUG UPLOAD CORRECTED ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
+    console.log('presentationId (from body):', presentationId);
+    console.log('Files received:', req.files);
 
     if (!presentationId) {
       return res.status(400).json({ error: 'presentationId is required in form-data' });
@@ -4134,24 +4247,22 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
     }
     const correctedDocument = files[0];
 
-    // Fetch the presentation document (by conference-id and creationId)
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
+    // Fetch the presentation document by its Firestore document ID
+    const presentationRef = db.collection('presentations').doc(presentationId);
+    const presentationDoc = await presentationRef.get();
 
-    if (presentationSnapshot.empty) {
+    if (!presentationDoc.exists) {
       return res.status(404).json({ error: 'Presentation not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
     const presentationData = presentationDoc.data();
+    const conferenceDocumentId = presentationData['conference-id']; // Get the conference document ID
 
     // Get presentation title
     const presentationTitle = presentationData.title || 'Sin título';
 
-    // Fetch conference data to get conference title and manager ID
-    const conferenceRef = db.collection('conferences').doc(conferenceId);
+    // Fetch conference data using the document ID from presentation
+    const conferenceRef = db.collection('conferences').doc(conferenceDocumentId);
     const conferenceDoc = await conferenceRef.get();
     
     if (!conferenceDoc.exists) {
@@ -4166,10 +4277,10 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
       return res.status(400).json({ error: 'Conference manager ID not found' });
     }
 
-    // Define the folder path for the presentation
-    const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    // Define the folder path using the NEW structure: uploads/conferences/conferenceCreationId/presentationCreationId
+    const presentationFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
     if (!fs.existsSync(presentationFolderPath)) {
-      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+      return res.status(400).json({ error: `The folder for presentation ${presentationCreationId} does not exist.` });
     }
 
     // Remove existing "general-*" file if present
@@ -4180,7 +4291,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
         fs.unlinkSync(path.join(presentationFolderPath, existingGeneral));
       }
     } catch (cleanErr) {
-      console.warn(`Could not clean previous general file for ${conferenceId}/${creationId}:`, cleanErr);
+      console.warn(`Could not clean previous general file for ${conferenceCreationId}/${presentationCreationId}:`, cleanErr);
     }
 
     // Save the new file as "general-{originalname}"
@@ -4194,7 +4305,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
 
     // Update Firestore: point to the new general file and mark corrected sent
     await presentationDoc.ref.update({
-      generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`,
+      generalDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${generalFileName}`,
       correctedDocumentSent: true,
       lastModified: new Date().toISOString()
     });
@@ -4215,7 +4326,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
       return res.status(400).json({ error: 'Manager email not found' });
     }
 
-    // Send email notification to conference manager
+    // Send email notification to conference manager (keeping same email logic)
     try {
       const mailOptions = {
         from: process.env.EMAIL_USER,
@@ -4301,7 +4412,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
 
     res.status(200).json({
       message: 'Corrected document uploaded and conference manager notified successfully',
-      generalDocumentPath: `/uploads/${conferenceId}/${creationId}/${generalFileName}`,
+      generalDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${generalFileName}`,
       presentationIdReceived: presentationId,
       managerNotified: true
     });
@@ -4315,12 +4426,17 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-corrected', fileUp
 
 
 // Endpoint to upload a presentation file
-app.post('/api/presentations/:conferenceId/:creationId/upload-presentation', fileUpload.fields([
+app.post('/api/presentations/:conferenceCreationId/:presentationCreationId/upload-presentation', fileUpload.fields([
   { name: 'presentationDocument', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
     const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+
+    console.log('=== BACKEND UPLOAD PRESENTATION DEBUG ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
+    console.log('presentationId (from body):', presentationId);
 
     if (!presentationId) {
       return res.status(400).json({ error: 'presentationId is required in form-data' });
@@ -4333,23 +4449,20 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-presentation', fil
     }
     const presentationDocument = files[0];
 
-    // Fetch the presentation document (by conference-id and creationId)
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
+    // Fetch the presentation document by its Firestore document ID
+    const presentationRef = db.collection('presentations').doc(presentationId);
+    const presentationDoc = await presentationRef.get();
 
-    if (presentationSnapshot.empty) {
+    if (!presentationDoc.exists) {
       return res.status(404).json({ error: 'Presentation not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
     const presentationData = presentationDoc.data();
 
-    // Define the folder path for the presentation
-    const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    // Define the folder path using the NEW structure: uploads/conferences/conferenceCreationId/presentationCreationId
+    const presentationFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
     if (!fs.existsSync(presentationFolderPath)) {
-      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+      return res.status(400).json({ error: `The folder for presentation ${presentationCreationId} does not exist.` });
     }
 
     // Remove existing "presentation-*" file if present
@@ -4361,7 +4474,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-presentation', fil
         console.log(`Removed existing presentation file: ${existingPresentation}`);
       }
     } catch (cleanErr) {
-      console.warn(`Could not clean previous presentation file for ${conferenceId}/${creationId}:`, cleanErr);
+      console.warn(`Could not clean previous presentation file for ${conferenceCreationId}/${presentationCreationId}:`, cleanErr);
     }
 
     // Save the new file as "presentation-{originalname}"
@@ -4375,14 +4488,14 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-presentation', fil
 
     // Update Firestore: add the presentation file path
     await presentationDoc.ref.update({
-      presentationDocumentPath: `/uploads/${conferenceId}/${creationId}/${presentationFileName}`,
+      presentationDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${presentationFileName}`,
       presentationDocumentSent: true,
       lastModified: new Date().toISOString()
     });
 
     res.status(200).json({
       message: 'Presentation document uploaded successfully',
-      presentationDocumentPath: `/uploads/${conferenceId}/${creationId}/${presentationFileName}`,
+      presentationDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${presentationFileName}`,
       presentationIdReceived: presentationId
     });
   } catch (error) {
@@ -4439,12 +4552,17 @@ app.patch('/api/presentations/:presentationId/overall-result', async (req, res) 
 });
 
 // Endpoint to upload final document with authors
-app.post('/api/presentations/:conferenceId/:creationId/upload-final', fileUpload.fields([
+app.post('/api/presentations/:conferenceCreationId/:presentationCreationId/upload-final', fileUpload.fields([
   { name: 'finalDocument', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
     const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+
+    console.log('=== BACKEND UPLOAD FINAL DEBUG ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
+    console.log('presentationId (from body):', presentationId);
 
     if (!presentationId) {
       return res.status(400).json({ error: 'presentationId is required in form-data' });
@@ -4457,23 +4575,20 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-final', fileUpload
     }
     const finalDocument = files[0];
 
-    // Fetch the presentation document (by conference-id and creationId)
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
+    // Fetch the presentation document by its Firestore document ID
+    const presentationRef = db.collection('presentations').doc(presentationId);
+    const presentationDoc = await presentationRef.get();
 
-    if (presentationSnapshot.empty) {
+    if (!presentationDoc.exists) {
       return res.status(404).json({ error: 'Presentation not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
     const presentationData = presentationDoc.data();
 
-    // Define the folder path for the final document
-    const finalFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    // Define the folder path using the NEW structure: uploads/conferences/conferenceCreationId/presentationCreationId
+    const finalFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
     if (!fs.existsSync(finalFolderPath)) {
-      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+      return res.status(400).json({ error: `The folder for presentation ${presentationCreationId} does not exist.` });
     }
 
     // Remove existing "final-*" file if present
@@ -4485,7 +4600,7 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-final', fileUpload
         console.log(`Removed existing final document file: ${existingFinal}`);
       }
     } catch (cleanErr) {
-      console.warn(`Could not clean previous final document file for ${conferenceId}/${creationId}:`, cleanErr);
+      console.warn(`Could not clean previous final document file for ${conferenceCreationId}/${presentationCreationId}:`, cleanErr);
     }
 
     // Save the new file as "final-{originalname}"
@@ -4499,14 +4614,14 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-final', fileUpload
 
     // Update Firestore: add the final document file path and set finalVersionUploaded to true
     await presentationDoc.ref.update({
-      finalDocumentPath: `/uploads/${conferenceId}/${creationId}/${finalFileName}`,
+      finalDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${finalFileName}`,
       finalVersionUploaded: true,
       lastModified: new Date().toISOString()
     });
 
     res.status(200).json({
       message: 'Final document uploaded successfully',
-      finalDocumentPath: `/uploads/${conferenceId}/${creationId}/${finalFileName}`,
+      finalDocumentPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${finalFileName}`,
       finalVersionUploaded: true,
       presentationIdReceived: presentationId
     });
@@ -4518,12 +4633,17 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-final', fileUpload
 
 
 // Endpoint to upload a payment receipt file
-app.post('/api/presentations/:conferenceId/:creationId/upload-payment', paymentUpload.fields([
+app.post('/api/presentations/:conferenceCreationId/:presentationCreationId/upload-payment', paymentUpload.fields([
   { name: 'paymentDocument', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
     const { presentationId } = req.body; // Firestore document id of the presentation (not creationId)
+
+    console.log('=== BACKEND UPLOAD PAYMENT DEBUG ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
+    console.log('presentationId (from body):', presentationId);
 
     if (!presentationId) {
       return res.status(400).json({ error: 'presentationId is required in form-data' });
@@ -4543,40 +4663,37 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-payment', paymentU
       return res.status(400).json({ error: 'Only JPG, JPEG, PNG, and PDF files are allowed for payment receipts' });
     }
 
-    // Fetch the presentation document (by conference-id and creationId)
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
+    // Fetch the presentation document by its Firestore document ID
+    const presentationRef = db.collection('presentations').doc(presentationId);
+    const presentationDoc = await presentationRef.get();
 
-    if (presentationSnapshot.empty) {
+    if (!presentationDoc.exists) {
       return res.status(404).json({ error: 'Presentation not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
     const presentationData = presentationDoc.data();
 
-    // Define the folder path for the presentation
-    const presentationFolderPath = path.join(__dirname, 'uploads', conferenceId, creationId);
+    // Define the folder path using the NEW structure: uploads/conferences/conferenceCreationId/presentationCreationId
+    const presentationFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
     if (!fs.existsSync(presentationFolderPath)) {
-      return res.status(400).json({ error: `The folder for presentation ${creationId} does not exist.` });
+      return res.status(400).json({ error: `The folder for presentation ${presentationCreationId} does not exist.` });
     }
 
-    // Remove existing "bill-*" file if present
+    // Remove existing "payment-*" file if present
     try {
       const folderFiles = fs.readdirSync(presentationFolderPath);
-      const existingBill = folderFiles.find(f => f.toLowerCase().startsWith('bill-'));
-      if (existingBill) {
-        fs.unlinkSync(path.join(presentationFolderPath, existingBill));
-        console.log(`Removed existing payment receipt file: ${existingBill}`);
+      const existingPayment = folderFiles.find(f => f.toLowerCase().startsWith('payment-'));
+      if (existingPayment) {
+        fs.unlinkSync(path.join(presentationFolderPath, existingPayment));
+        console.log(`Removed existing payment receipt file: ${existingPayment}`);
       }
     } catch (cleanErr) {
-      console.warn(`Could not clean previous payment receipt file for ${conferenceId}/${creationId}:`, cleanErr);
+      console.warn(`Could not clean previous payment receipt file for ${conferenceCreationId}/${presentationCreationId}:`, cleanErr);
     }
 
-    // Save the new file as "bill-{originalname}"
-    const billFileName = `bill-${paymentDocument.originalname}`;
-    const destinationPath = path.join(presentationFolderPath, billFileName);
+    // Save the new file as "payment-{originalname}"
+    const paymentFileName = `payment-${paymentDocument.originalname}`;
+    const destinationPath = path.join(presentationFolderPath, paymentFileName);
 
     fs.renameSync(
       path.join(__dirname, 'uploads', paymentDocument.filename),
@@ -4585,14 +4702,14 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-payment', paymentU
 
     // Update Firestore: add the payment receipt file path
     await presentationDoc.ref.update({
-      paymentReceiptPath: `/uploads/${conferenceId}/${creationId}/${billFileName}`,
+      paymentReceiptPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${paymentFileName}`,
       paymentReceiptSent: true,
       lastModified: new Date().toISOString()
     });
 
     res.status(200).json({
       message: 'Payment receipt uploaded successfully',
-      paymentReceiptPath: `/uploads/${conferenceId}/${creationId}/${billFileName}`,
+      paymentReceiptPath: `/uploads/conferences/${conferenceCreationId}/${presentationCreationId}/${paymentFileName}`,
       presentationIdReceived: presentationId
     });
   } catch (error) {
@@ -4601,36 +4718,67 @@ app.post('/api/presentations/:conferenceId/:creationId/upload-payment', paymentU
   }
 });
 
-
-// Endpoint to view a presentation document by conferenceId and creationId
-app.get('/api/presentations/:conferenceId/:creationId/view-presentation', async (req, res) => {
+// Endpoint to view a document by conferenceCreationId and presentationCreationId
+app.get('/api/presentations/:conferenceCreationId/:presentationCreationId/view', async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
 
-    // Find the presentation document
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
-
-    if (presentationSnapshot.empty) {
-      return res.status(404).json({ error: 'Presentation not found' });
+    // Construct the file path using the new structure: uploads/conferences/conferenceCreationId/presentationCreationId
+    const documentFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
+    
+    // Check if the folder exists
+    if (!fs.existsSync(documentFolderPath)) {
+      return res.status(404).json({ error: 'Document folder not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
-    const presentationData = presentationDoc.data();
-    const presentationDocumentPath = presentationData.presentationDocumentPath;
+    const files = fs.readdirSync(documentFolderPath);
 
-    if (!presentationDocumentPath) {
+    // Find the general document in the folder
+    const generalDocument = files.find(file => file.startsWith('general-'));
+    if (!generalDocument) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const filePath = path.join(documentFolderPath, generalDocument);
+
+    // Send the file to the client for viewing
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error viewing document:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+// Endpoint to view a presentation document by conferenceCreationId and presentationCreationId
+app.get('/api/presentations/:conferenceCreationId/:presentationCreationId/view-presentation', async (req, res) => {
+  try {
+    const { conferenceCreationId, presentationCreationId } = req.params;
+
+    console.log('=== BACKEND VIEW PRESENTATION DEBUG ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
+
+    // Construct the file path using the new structure
+    const documentFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
+    
+    console.log('Looking for folder at:', documentFolderPath);
+    
+    if (!fs.existsSync(documentFolderPath)) {
+      return res.status(404).json({ error: 'Document folder not found' });
+    }
+
+    const files = fs.readdirSync(documentFolderPath);
+    console.log('Files in folder:', files);
+
+    // Find the presentation document in the folder
+    const presentationDocument = files.find(file => file.startsWith('presentation-'));
+    if (!presentationDocument) {
       return res.status(404).json({ error: 'Presentation document not found' });
     }
 
-    // Build the file path
-    const filePath = path.join(__dirname, presentationDocumentPath);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Presentation document file not found on server' });
-    }
+    const filePath = path.join(documentFolderPath, presentationDocument);
+    console.log('Final file path:', filePath);
 
     // Determine content type based on file extension
     const ext = path.extname(filePath).toLowerCase();
@@ -4654,38 +4802,34 @@ app.get('/api/presentations/:conferenceId/:creationId/view-presentation', async 
   }
 });
 
-// Endpoint to download a presentation document by conferenceId and creationId
-app.get('/api/presentations/:conferenceId/:creationId/download-presentation', async (req, res) => {
+// Endpoint to download a presentation document by conferenceCreationId and presentationCreationId
+app.get('/api/presentations/:conferenceCreationId/:presentationCreationId/download-presentation', async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
 
-    // Find the presentation document
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
+    console.log('=== BACKEND DOWNLOAD PRESENTATION DEBUG ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
 
-    if (presentationSnapshot.empty) {
-      return res.status(404).json({ error: 'Presentation not found' });
+    // Construct the file path using the new structure
+    const documentFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
+    
+    if (!fs.existsSync(documentFolderPath)) {
+      return res.status(404).json({ error: 'Document folder not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
-    const presentationData = presentationDoc.data();
-    const presentationDocumentPath = presentationData.presentationDocumentPath;
+    const files = fs.readdirSync(documentFolderPath);
 
-    if (!presentationDocumentPath) {
+    // Find the presentation document in the folder
+    const presentationDocument = files.find(file => file.startsWith('presentation-'));
+    if (!presentationDocument) {
       return res.status(404).json({ error: 'Presentation document not found' });
     }
 
-    // Build the file path
-    const filePath = path.join(__dirname, presentationDocumentPath);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Presentation document file not found on server' });
-    }
+    const filePath = path.join(documentFolderPath, presentationDocument);
 
     // Extract filename for download
-    const filename = path.basename(presentationDocumentPath);
+    const filename = path.basename(presentationDocument);
     
     // Set headers for download
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -4696,35 +4840,35 @@ app.get('/api/presentations/:conferenceId/:creationId/download-presentation', as
   }
 });
 
-// Endpoint to view a payment receipt by conferenceId and creationId
-app.get('/api/presentations/:conferenceId/:creationId/view-payment', async (req, res) => {
+// Endpoint to view a payment receipt by conferenceCreationId and presentationCreationId
+app.get('/api/presentations/:conferenceCreationId/:presentationCreationId/view-payment', async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
 
-    // Find the presentation document
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
+    console.log('=== BACKEND VIEW PAYMENT DEBUG ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
 
-    if (presentationSnapshot.empty) {
-      return res.status(404).json({ error: 'Presentation not found' });
+    // Construct the file path using the new structure
+    const documentFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
+    
+    console.log('Looking for folder at:', documentFolderPath);
+    
+    if (!fs.existsSync(documentFolderPath)) {
+      return res.status(404).json({ error: 'Document folder not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
-    const presentationData = presentationDoc.data();
-    const paymentReceiptPath = presentationData.paymentReceiptPath;
+    const files = fs.readdirSync(documentFolderPath);
+    console.log('Files in folder:', files);
 
-    if (!paymentReceiptPath) {
+    // Find the payment document in the folder
+    const paymentDocument = files.find(file => file.startsWith('payment-'));
+    if (!paymentDocument) {
       return res.status(404).json({ error: 'Payment receipt not found' });
     }
 
-    // Build the file path
-    const filePath = path.join(__dirname, paymentReceiptPath);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Payment receipt file not found on server' });
-    }
+    const filePath = path.join(documentFolderPath, paymentDocument);
+    console.log('Final file path:', filePath);
 
     // Determine content type based on file extension
     const ext = path.extname(filePath).toLowerCase();
@@ -4748,38 +4892,34 @@ app.get('/api/presentations/:conferenceId/:creationId/view-payment', async (req,
   }
 });
 
-// Endpoint to download a payment receipt by conferenceId and creationId
-app.get('/api/presentations/:conferenceId/:creationId/download-payment', async (req, res) => {
+// Endpoint to download a payment receipt by conferenceCreationId and presentationCreationId
+app.get('/api/presentations/:conferenceCreationId/:presentationCreationId/download-payment', async (req, res) => {
   try {
-    const { conferenceId, creationId } = req.params;
+    const { conferenceCreationId, presentationCreationId } = req.params;
 
-    // Find the presentation document
-    const presentationRef = db.collection('presentations')
-      .where('conference-id', '==', conferenceId)
-      .where('creationId', '==', parseInt(creationId, 10));
-    const presentationSnapshot = await presentationRef.get();
+    console.log('=== BACKEND DOWNLOAD PAYMENT DEBUG ===');
+    console.log('conferenceCreationId:', conferenceCreationId);
+    console.log('presentationCreationId:', presentationCreationId);
 
-    if (presentationSnapshot.empty) {
-      return res.status(404).json({ error: 'Presentation not found' });
+    // Construct the file path using the new structure
+    const documentFolderPath = path.join(__dirname, 'uploads', 'conferences', conferenceCreationId, presentationCreationId);
+    
+    if (!fs.existsSync(documentFolderPath)) {
+      return res.status(404).json({ error: 'Document folder not found' });
     }
 
-    const presentationDoc = presentationSnapshot.docs[0];
-    const presentationData = presentationDoc.data();
-    const paymentReceiptPath = presentationData.paymentReceiptPath;
+    const files = fs.readdirSync(documentFolderPath);
 
-    if (!paymentReceiptPath) {
+    // Find the payment document in the folder
+    const paymentDocument = files.find(file => file.startsWith('payment-'));
+    if (!paymentDocument) {
       return res.status(404).json({ error: 'Payment receipt not found' });
     }
 
-    // Build the file path
-    const filePath = path.join(__dirname, paymentReceiptPath);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Payment receipt file not found on server' });
-    }
+    const filePath = path.join(documentFolderPath, paymentDocument);
 
     // Extract filename for download
-    const filename = path.basename(paymentReceiptPath);
+    const filename = path.basename(paymentDocument);
     
     // Set headers for download
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -5885,7 +6025,167 @@ app.get('/api/news/:id', async (req, res) => {
   }
 });
 
+// Endpoint to delete a news item
+app.delete('/api/news/:id', async (req, res) => {
+  try {
+    const newsId = req.params.id;
+    
+    // Get news document to check if it exists and get image paths
+    const newsDoc = await db.collection('news').doc(newsId).get();
+    
+    if (!newsDoc.exists) {
+      return res.status(404).json({ error: 'News not found' });
+    }
+    
+    const newsData = newsDoc.data();
+    
+    // Delete associated images from file system
+    if (newsData.imageLinks && newsData.imageLinks.length > 0) {
+      for (const imagePath of newsData.imageLinks) {
+        try {
+          const fullPath = path.join(__dirname, imagePath);
+          await require('fs').promises.unlink(fullPath);
+          console.log(`Deleted image: ${fullPath}`);
+        } catch (fileError) {
+          console.warn(`Could not delete image: ${imagePath}`, fileError.message);
+          // Continue even if image deletion fails
+        }
+      }
+      
+      // Try to delete the empty directory
+      try {
+        const newsDir = path.join(__dirname, 'uploads', 'newsModule', newsId);
+        await require('fs').promises.rmdir(newsDir, { recursive: true });
+        console.log(`Deleted news directory: ${newsDir}`);
+      } catch (dirError) {
+        console.warn(`Could not delete news directory for ${newsId}:`, dirError.message);
+      }
+    }
+    
+    // Delete the news document from Firestore
+    await db.collection('news').doc(newsId).delete();
+    
+    res.status(200).json({
+      message: 'News deleted successfully',
+      newsId: newsId
+    });
+    
+  } catch (error) {
+    console.error('Error deleting news:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
 
+// Endpoint to update a news item
+app.put('/api/news/:id', newsImageUpload.array('images', 10), async (req, res) => {
+  try {
+    const newsId = req.params.id;
+    const { title, content, creatorId, existingImages } = req.body;
+    
+    // Get current news document
+    const newsDoc = await db.collection('news').doc(newsId).get();
+    
+    if (!newsDoc.exists) {
+      return res.status(404).json({ error: 'News not found' });
+    }
+    
+    const currentNews = newsDoc.data();
+    
+    // Check ownership
+    if (currentNews.creatorId !== creatorId) {
+      return res.status(403).json({ error: 'You can only edit your own news' });
+    }
+    
+    // Parse existing images to keep
+    const imagesToKeep = existingImages ? JSON.parse(existingImages) : [];
+    const currentImages = currentNews.imageLinks || [];
+    
+    // Delete removed images
+    const imagesToDelete = currentImages.filter(img => !imagesToKeep.includes(img));
+    for (const imagePath of imagesToDelete) {
+      try {
+        const fullPath = path.join(__dirname, imagePath);
+        await require('fs').promises.unlink(fullPath);
+        console.log(`Deleted removed image: ${fullPath}`);
+      } catch (fileError) {
+        console.warn(`Could not delete image: ${imagePath}`, fileError.message);
+      }
+    }
+    
+    // Process new uploaded images
+    const newImageLinks = [];
+    const newsImagesDir = path.join(__dirname, 'uploads', 'newsModule', newsId, 'images');
+    await require('fs').promises.mkdir(newsImagesDir, { recursive: true });
+    
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        const fileName = `${Date.now()}-${file.originalname}`;
+        const newPath = path.join(newsImagesDir, fileName);
+        
+        await require('fs').promises.rename(file.path, newPath);
+        
+        const relativePath = `uploads/newsModule/${newsId}/images/${fileName}`;
+        newImageLinks.push(relativePath);
+      }
+    }
+    
+    // Combine kept images with new images
+    const finalImageLinks = [...imagesToKeep, ...newImageLinks];
+    
+    // Update the news document
+    const updatedData = {
+      title,
+      content,
+      imageLinks: finalImageLinks,
+      updatedAt: new Date().toISOString()
+    };
+    
+    await db.collection('news').doc(newsId).update(updatedData);
+    
+    res.status(200).json({
+      message: 'News updated successfully',
+      newsId: newsId,
+      news: { id: newsId, ...currentNews, ...updatedData }
+    });
+    
+  } catch (error) {
+    console.error('Error updating news:', error);
+    
+    // Clean up temp files if error occurs
+    if (req.files) {
+      req.files.forEach(file => {
+        require('fs').unlink(file.path, (err) => {
+          if (err) console.error('Error deleting temp file:', err);
+        });
+      });
+    }
+    
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+//Endpoint to get basic information from a user
+app.get('/api/users/:id', async (req, res) => {
+  const userId = req.params.id;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
+
+  try {
+    const userDoc = await db.collection('users').doc(userId).get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    res.status(200).json(userData);
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 
 //#################################################################################################
