@@ -5843,6 +5843,324 @@ app.post('/api/conferences/:id/send-certificates', async (req, res) => {
   }
 });
 
+// Endpoint to generate and download certificates for all registered users in an event
+app.post('/api/events/:id/generate-certificates', async (req, res) => {
+  try {
+    const eventId = req.params.id;
+
+    // Fetch the event data
+    const eventRef = db.collection('events').doc(eventId);
+    const eventDoc = await eventRef.get();
+
+    if (!eventDoc.exists) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    const eventData = eventDoc.data();
+    const eventTitle = eventData.title;
+    const registeredUsers = eventData.registeredUsers || [];
+
+    if (registeredUsers.length === 0) {
+      return res.status(400).json({ error: 'No registered users found for this event' });
+    }
+
+    console.log(`Generating certificates for ${registeredUsers.length} users in event: ${eventTitle}`);
+
+    // Path to the certificate template
+    const templatePath = path.join(__dirname, 'uploads', 'Certificate_template', 'Plantilla.pdf');
+
+    // Check if the template exists
+    try {
+      await fs.promises.access(templatePath);
+    } catch (error) {
+      return res.status(404).json({ error: 'Certificate template not found at: ' + templatePath });
+    }
+
+    // Format the Costa Rican date
+    function formatCostaRicanDate(dateString) {
+      const date = new Date(dateString);
+      const months = [
+        'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+        'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre'
+      ];
+      const day = date.getDate();
+      const month = months[date.getMonth()];
+      const year = date.getFullYear();
+      return `${day} de ${month} de ${year}`;
+    }
+
+    const formattedDate = formatCostaRicanDate(new Date());
+
+    // Collect all certificates data
+    const certificatesData = [];
+    const usersRef = db.collection('users');
+
+    for (const userId of registeredUsers) {
+      const userRef = usersRef.doc(userId);
+      const userDoc = await userRef.get();
+
+      if (!userDoc.exists) {
+        console.error(`User ${userId} not found`);
+        continue;
+      }
+
+      const userData = userDoc.data();
+      const userFullName = `${userData.name} ${userData.lastName1} ${userData.lastName2}`;
+
+      console.log(`Generating certificate for: ${userFullName}`);
+
+      // Load the PDF template
+      const templateBytes = await fs.promises.readFile(templatePath);
+      const pdfDoc = await PDFDocument.load(templateBytes);
+
+      // Get the first page
+      const pages = pdfDoc.getPages();
+      const firstPage = pages[0];
+      const { width, height } = firstPage.getSize();
+
+      // Embed fonts
+      const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      const regularFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+      // Add user name (CENTERED)
+      const userFontSize = 25;
+      const userNameWidth = boldFont.widthOfTextAtSize(userFullName, userFontSize);
+      firstPage.drawText(userFullName, {
+        x: (width - userNameWidth) / 2,
+        y: height - 250,
+        size: userFontSize,
+        font: boldFont,
+        color: rgb(0, 0, 0),
+      });
+
+      // Add "por haber participado en el"
+      const participationText = "por haber participado en el";
+      firstPage.drawText(participationText, {
+        x: width / 2 - (participationText.length * 2.5),
+        y: height - 320,
+        size: 12,
+        font: regularFont,
+        color: rgb(0, 0, 0),
+      });
+
+      // Add event title (UPPERCASE and BOLD)
+      const eventUpper = eventTitle.toUpperCase();
+      const eventFontSize = 16;
+      const eventWidth = boldFont.widthOfTextAtSize(eventUpper, eventFontSize);
+      firstPage.drawText(eventUpper, {
+        x: (width - eventWidth) / 2,
+        y: height - 360,
+        size: eventFontSize,
+        font: boldFont,
+        color: rgb(0, 0, 0),
+      });
+
+      // Add location and date
+      const locationDate = `San Carlos, ${formattedDate}`;
+      const locationFontSize = 12;
+      const locationWidth = regularFont.widthOfTextAtSize(locationDate, locationFontSize);
+      firstPage.drawText(locationDate, {
+        x: (width - locationWidth) / 2,
+        y: height - 490,
+        size: locationFontSize,
+        font: regularFont,
+        color: rgb(0, 0, 0),
+      });
+
+      // Save the PDF
+      const pdfBytes = await pdfDoc.save();
+
+      certificatesData.push({
+        userFullName,
+        pdfBytes,
+        filename: `certificado_${userFullName.replace(/\s+/g, '_')}.pdf`
+      });
+    }
+
+    if (certificatesData.length === 0) {
+      return res.status(400).json({ error: 'No certificates could be generated' });
+    }
+
+    // Create a ZIP file with all certificates
+    const JSZip = require('jszip');
+    const zip = new JSZip();
+
+    for (const certData of certificatesData) {
+      zip.file(certData.filename, certData.pdfBytes);
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+    // Send the ZIP file for download
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="certificados_${eventTitle.replace(/\s+/g, '_')}.zip"`);
+    res.send(zipBuffer);
+
+    console.log(`Successfully generated ${certificatesData.length} certificates for event: ${eventTitle}`);
+  } catch (error) {
+    console.error('Error generating certificates:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Endpoint to upload signed certificates for an event
+app.post('/api/events/:id/upload-event-signed-certificates', zipUpload.single('signedCertificates'), async (req, res) => {
+  try {
+    const eventId = req.params.id;
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'Signed certificates ZIP file is required' });
+    }
+
+    if (!req.file.originalname.toLowerCase().endsWith('.zip')) {
+      return res.status(400).json({ error: 'File must be a ZIP archive' });
+    }
+
+    console.log(`Received ZIP file: ${req.file.originalname}`);
+
+    // Get event data
+    const eventRef = db.collection('events').doc(eventId);
+    const eventDoc = await eventRef.get();
+
+    if (!eventDoc.exists) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    const eventData = eventDoc.data();
+    const registeredUsers = eventData.registeredUsers || [];
+
+    if (registeredUsers.length === 0) {
+      return res.status(400).json({ error: 'No registered users found for this event' });
+    }
+
+    console.log(`Registered users for event ${eventId}:`, registeredUsers);
+
+    // Fetch user data for all registered users
+    const usersCollection = {};
+    const usersRef = db.collection('users');
+
+    for (const userId of registeredUsers) {
+      const userDoc = await usersRef.doc(userId).get();
+      if (userDoc.exists) {
+        usersCollection[userId] = userDoc.data();
+      }
+    }
+
+    console.log('Fetched user data for registered users:', usersCollection);
+
+    // Read and extract the uploaded ZIP
+    const JSZip = require('jszip');
+    const zipBuffer = await fs.promises.readFile(req.file.path);
+    const zip = await JSZip.loadAsync(zipBuffer);
+
+    console.log(`Extracting files from ZIP...`);
+
+    // Clean up the temporary file
+    fs.unlink(req.file.path, (err) => {
+      if (err) console.error('Error deleting temp file:', err);
+    });
+
+    // Process each file in the ZIP
+    const processedCertificates = [];
+    const errors = [];
+
+    for (const [filename, fileData] of Object.entries(zip.files)) {
+      if (fileData.dir || !filename.toLowerCase().endsWith('.pdf')) {
+        console.log(`Skipping non-PDF file: ${filename}`);
+        continue;
+      }
+
+      console.log(`Processing file: ${filename}`);
+
+      // Match user ID from filename
+      const userId = matchUserIdFromFilename(filename, registeredUsers, usersCollection);
+
+      if (!userId) {
+        console.error(`Could not match user ID for filename: ${filename}`);
+        errors.push(`Could not match user ID for filename: ${filename}`);
+        continue;
+      }
+
+      try {
+        // Save the signed certificate to the user's folder
+        const certificatePath = path.join(
+          __dirname,
+          'uploads',
+          'generalEvents',
+          'certificates',
+          eventId,
+          userId
+        );
+
+        console.log(`Creating directory: ${certificatePath}`);
+        await fs.promises.mkdir(certificatePath, { recursive: true });
+
+        const fileBuffer = await fileData.async('nodebuffer');
+        const savedFilePath = path.join(certificatePath, filename);
+
+        console.log(`Saving file to: ${savedFilePath}`);
+        await fs.promises.writeFile(savedFilePath, fileBuffer);
+
+        processedCertificates.push({
+          userId,
+          filename,
+          savedPath: savedFilePath,
+        });
+      } catch (saveError) {
+        console.error(`Error saving certificate for user ${userId}:`, saveError);
+        errors.push(`Failed to save certificate for user ${userId}: ${saveError.message}`);
+      }
+    }
+
+    res.status(200).json({
+      message: `Signed certificates uploaded successfully`,
+      processedCount: processedCertificates.length,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    console.error('Error uploading signed certificates:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Helper function to extract user ID from filename
+function extractUserIdFromFilename(filename) {
+  const match = filename.match(/user_(\w+)_signed\.pdf/i); // Example: user_12345_signed.pdf
+  return match ? match[1] : null;
+}
+
+// Helper function to match filenames to registered users
+function matchUserIdFromFilename(filename, registeredUsers, usersCollection) {
+  // Extract the name from the filename (e.g., "Leandro_Vásquez_Vega" from "certificado_Leandro_Vásquez_Vega.pdf")
+  const nameMatch = filename.match(/certificado_(.+)\.pdf/i);
+  if (!nameMatch) return null;
+
+  const extractedName = nameMatch[1].replace(/_/g, ' '); // Replace underscores with spaces
+  console.log(`Extracted name from filename: ${extractedName}`);
+
+  // Find the user in the registered users list by matching the name
+  for (const userId of registeredUsers) {
+    const userDoc = usersCollection[userId];
+    if (!userDoc) continue;
+
+    const fullName = `${userDoc.name} ${userDoc.lastName1} ${userDoc.lastName2}`;
+    if (normalizeString(fullName) === normalizeString(extractedName)) {
+      return userId; // Return the matched user ID
+    }
+  }
+
+  return null; // No match found
+}
+
+// Helper function to normalize strings for comparison
+function normalizeString(str) {
+  return str
+    .normalize('NFD') // Normalize accented characters
+    .replace(/[\u0300-\u036f]/g, '') // Remove diacritics
+    .toLowerCase()
+    .trim();
+}
+
 // Multer configuration for news images
 const newsImageUpload = multer({
   storage: multer.diskStorage({
@@ -5865,6 +6183,135 @@ const newsImageUpload = multer({
   },
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB limit per image
+  }
+});
+
+// Endpoint to send certificates via email to event participants
+app.post('/api/events/:id/send-certificates', async (req, res) => {
+  try {
+    const eventId = req.params.id;
+
+    // Get event data
+    const eventRef = db.collection('events').doc(eventId);
+    const eventDoc = await eventRef.get();
+
+    if (!eventDoc.exists) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    const eventData = eventDoc.data();
+    const eventTitle = eventData.title;
+    const registeredUsers = eventData.registeredUsers || [];
+
+    if (registeredUsers.length === 0) {
+      return res.status(400).json({ error: 'No registered users found for this event' });
+    }
+
+    console.log(`Sending certificates via email for event: ${eventTitle}`);
+
+    // Fetch user data for all registered users
+    const usersCollection = {};
+    const usersRef = db.collection('users');
+
+    for (const userId of registeredUsers) {
+      const userDoc = await usersRef.doc(userId).get();
+      if (userDoc.exists) {
+        usersCollection[userId] = userDoc.data();
+      }
+    }
+
+    console.log('Fetched user data for registered users:', usersCollection);
+
+    // Prepare emails
+    const emailsToSend = [];
+    const errors = [];
+
+    for (const userId of registeredUsers) {
+      const userDoc = usersCollection[userId];
+      if (!userDoc) {
+        errors.push(`User ID ${userId} not found in users collection`);
+        continue;
+      }
+
+      const userEmail = userDoc.email;
+      const userFullName = `${userDoc.name} ${userDoc.lastName1} ${userDoc.lastName2}`;
+      const certificatePath = path.join(
+        __dirname,
+        'uploads',
+        'generalEvents',
+        'certificates',
+        eventId,
+        userId,
+        `certificado_${userFullName.replace(/\s+/g, '_')}.pdf`
+      );
+
+      // Check if the certificate exists
+      try {
+        await fs.promises.access(certificatePath);
+      } catch (error) {
+        console.error(`Certificate not found for user ${userFullName}: ${certificatePath}`);
+        errors.push(`Certificate not found for user ${userFullName}`);
+        continue;
+      }
+
+      // Prepare the email
+      emailsToSend.push({
+        to: userEmail,
+        subject: `Certificado de Participación - ${eventTitle}`,
+        text: `
+        Estimado/a ${userFullName},
+
+        Nos complace enviarle su certificado de participación en el evento "${eventTitle}".
+
+        Adjunto encontrará su certificado en formato PDF.
+
+        ¡Gracias por participar!
+
+        Saludos cordiales,
+        Equipo Organizador
+        `,
+        attachments: [
+          {
+            filename: `certificado_${userFullName.replace(/\s+/g, '_')}.pdf`,
+            path: certificatePath,
+          },
+        ],
+      });
+    }
+
+    // Send emails
+    const transporter = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false, // Use STARTTLS
+      auth: {
+        user: "prostem.itcr@gmail.com",
+        pass: "zevnywbizdymsuee"
+      }
+    });
+
+    let sentCount = 0;
+
+    for (const emailData of emailsToSend) {
+      try {
+        await transporter.sendMail(emailData);
+        console.log(`Certificate sent to ${emailData.to}`);
+        sentCount++;
+      } catch (error) {
+        console.error(`Error sending certificate to ${emailData.to}:`, error);
+        errors.push(`Failed to send certificate to ${emailData.to}`);
+      }
+    }
+
+    res.status(200).json({
+      message: `Certificates sent successfully`,
+      sentCount,
+      totalCount: emailsToSend.length,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    console.error('Error sending certificates:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
