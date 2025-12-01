@@ -6634,6 +6634,27 @@ app.get('/api/users/:id', async (req, res) => {
   }
 });
 
+// Endpoint to get conferences for calendar
+app.get('/api/conferences-for-calendar', async (req, res) => {
+  try {
+    const conferencesSnapshot = await db.collection('conferences').get();
+    const conferences = conferencesSnapshot.docs.map(doc => ({
+      id: doc.id,
+      title: doc.data().title,
+      startDate: doc.data().startDate,
+      finishDate: doc.data().finishDate,
+      startTime: doc.data().startTime,
+      finishTime: doc.data().finishTime,
+      description: doc.data().description,
+      place: doc.data().place
+    }));
+    res.status(200).json(conferences);
+  } catch (error) {
+    console.error('Error fetching conferences for calendar:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 //#################################################################################################
 
