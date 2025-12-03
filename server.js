@@ -1766,7 +1766,8 @@ app.post("/api/conferences/:id", async (req, res) => {
       creationId: newCreationId,     // Formatted ID stored in creationId field (C001, C002, etc.)
       resultsSent: 0,
       finalResults: false,
-      presentations: []
+      presentations: [],
+      active: true
     };
 
     const newConference = await conferencesDB.add(newConferenceData);
@@ -2114,79 +2115,218 @@ async function sendFinalRejectionEmail(creatorId, presentationTitle, conferenceT
 
 // Helper function to send result emails
 async function sendResultEmail(resultState, creatorId, presentationTitle, conferenceTitle, reviewersAssigned) {
-  // Fetch the creator's email
-  const creatorRef = db.collection("users").doc(creatorId);
-  const creatorDoc = await creatorRef.get();
+  try {
+    // Fetch the creator's email
+    const creatorRef = db.collection("users").doc(creatorId);
+    const creatorDoc = await creatorRef.get();
 
-  if (!creatorDoc.exists) {
-    console.error(`Creator ${creatorId} not found`);
-    return;
-  }
+    if (!creatorDoc.exists) {
+      console.error(`Creator ${creatorId} not found`);
+      return;
+    }
 
-  const creatorEmail = creatorDoc.get("email");
+    const creatorEmail = creatorDoc.get("email");
+    const creatorName = creatorDoc.get("name") || "Estimado/a participante";
 
-  // Send email based on the result
-  let emailSubject = "Resultado de la revisión de su ponencia";
-  let emailBody = "";
+    // Send email based on the result
+    let emailSubject = "";
+    let emailBody = "";
 
-  if (resultState === "Aceptada") {
-    emailBody = `
-      Estimado usuario,
-      
-      Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada. 
-      Por favor, regrese al sitio web para subir el documento completo, incluyendo los autores.
-      
-      Atentamente,
-      El equipo de la conferencia
-    `;
-  } else if (resultState === "No Aceptada") {
-    emailBody = `
-      Estimado usuario,
-      
-      Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" no fue aceptada.
-      
-      Atentamente,
-      El equipo de la conferencia
-    `;
-  } else if (resultState === "Aceptada con cambios requeridos") {
-    // Collect required changes from reviewers
-    let requiredChangesList = [];
-    for (const reviewer of reviewersAssigned) {
-      if (reviewer.state === "Aceptada con cambios requeridos") {
-        const filledFormId = reviewer["filled-form-id"];
-        const filledFormRef = db.collection("filled-forms").doc(filledFormId);
-        const filledFormDoc = await filledFormRef.get();
+    if (resultState === "Aceptada") {
+      emailSubject = `✅ Ponencia Aceptada - ${conferenceTitle}`;
+      emailBody = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background-color: #28a745; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
+                .content { background-color: #f8f9fa; padding: 30px; border-radius: 0 0 5px 5px; }
+                .highlight { background-color: #d1ecf1; padding: 15px; border-left: 4px solid #28a745; margin: 20px 0; }
+                .footer { text-align: center; margin-top: 20px; font-size: 14px; color: #666; }
+                .action-required { background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🎉 ¡Felicitaciones! Su ponencia ha sido aceptada</h2>
+                </div>
+                
+                <div class="content">
+                    <p><strong>${creatorName},</strong></p>
+                    
+                    <div class="highlight">
+                        <p><strong>📄 Ponencia:</strong> "${presentationTitle}"</p>
+                        <p><strong>🎯 Conferencia:</strong> "${conferenceTitle}"</p>
+                        <p><strong>✅ Estado:</strong> Aceptada</p>
+                    </div>
+                    
+                    <p>Nos complace informarle que su ponencia ha sido <strong>aceptada</strong> para presentación en la conferencia.</p>
+                    
+                    <div class="action-required">
+                        <p><strong>📋 Próximos pasos:</strong></p>
+                        <p>Por favor, regrese al sitio web para subir el documento completo, incluyendo los autores.</p>
+                    </div>
+                    
+                    <p>¡Esperamos su presentación en el evento!</p>
+                </div>
+                
+                <div class="footer">
+                    <p>📧 Este es un mensaje automático del sistema de gestión de conferencias</p>
+                    <p><strong>Equipo ProSTEM</strong></p>
+                </div>
+            </div>
+        </body>
+        </html>
+      `;
+    } else if (resultState === "No Aceptada") {
+      emailSubject = `❌ Resultado de revisión - ${conferenceTitle}`;
+      emailBody = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background-color: #dc3545; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
+                .content { background-color: #f8f9fa; padding: 30px; border-radius: 0 0 5px 5px; }
+                .highlight { background-color: #f8d7da; padding: 15px; border-left: 4px solid #dc3545; margin: 20px 0; }
+                .footer { text-align: center; margin-top: 20px; font-size: 14px; color: #666; }
+                .encouragement { background-color: #e2e3e5; padding: 15px; border-left: 4px solid #6c757d; margin: 20px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>📋 Resultado de la revisión de su ponencia</h2>
+                </div>
+                
+                <div class="content">
+                    <p><strong>${creatorName},</strong></p>
+                    
+                    <div class="highlight">
+                        <p><strong>📄 Ponencia:</strong> "${presentationTitle}"</p>
+                        <p><strong>🎯 Conferencia:</strong> "${conferenceTitle}"</p>
+                        <p><strong>❌ Estado:</strong> No Aceptada</p>
+                    </div>
+                    
+                    <p>Lamentamos informarle que su ponencia no fue aceptada para presentación en esta conferencia.</p>
+                    
+                    <div class="encouragement">
+                        <p><strong>💪 No se desanime:</strong></p>
+                        <p>Le animamos a seguir desarrollando su investigación y considerar futuras oportunidades de presentación.</p>
+                    </div>
+                    
+                    <p>Agradecemos su interés y participación en nuestra conferencia.</p>
+                </div>
+                
+                <div class="footer">
+                    <p>📧 Este es un mensaje automático del sistema de gestión de conferencias</p>
+                    <p><strong>Equipo ProSTEM</strong></p>
+                </div>
+            </div>
+        </body>
+        </html>
+      `;
+    } else if (resultState === "Aceptada con cambios requeridos") {
+      // Collect required changes from reviewers
+      let requiredChangesList = [];
+      for (const reviewer of reviewersAssigned) {
+        if (reviewer.state === "Aceptada con cambios requeridos") {
+          const filledFormId = reviewer["filled-form-id"];
+          const filledFormRef = db.collection("filled-forms").doc(filledFormId);
+          const filledFormDoc = await filledFormRef.get();
 
-        if (filledFormDoc.exists) {
-          const filledFormData = filledFormDoc.data();
-          const answers = filledFormData.answers || [];
-          const lastAnswer = answers[answers.length - 1]; // Get the last question
-          if (lastAnswer && lastAnswer.requiredChanges) {
-            requiredChangesList.push(lastAnswer.requiredChanges);
+          if (filledFormDoc.exists) {
+            const filledFormData = filledFormDoc.data();
+            const answers = filledFormData.answers || [];
+            const lastAnswer = answers[answers.length - 1]; // Get the last question
+            if (lastAnswer && lastAnswer.requiredChanges) {
+              requiredChangesList.push(lastAnswer.requiredChanges);
+            }
           }
         }
       }
+
+      // Format required changes for HTML
+      const requiredChangesHtml = requiredChangesList.length > 0
+        ? requiredChangesList.map(change => `<li>${change}</li>`).join('')
+        : '<li>No se especificaron cambios requeridos.</li>';
+
+      emailSubject = `📝 Ponencia Aceptada con Cambios - ${conferenceTitle}`;
+      emailBody = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background-color: #ffc107; color: #212529; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
+                .content { background-color: #f8f9fa; padding: 30px; border-radius: 0 0 5px 5px; }
+                .highlight { background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0; }
+                .footer { text-align: center; margin-top: 20px; font-size: 14px; color: #666; }
+                .changes-box { background-color: #e7f1ff; padding: 15px; border-left: 4px solid #0066cc; margin: 20px 0; }
+                .changes-box ul { margin: 10px 0; padding-left: 20px; }
+                .changes-box li { margin: 8px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>📝 Ponencia aceptada con cambios requeridos</h2>
+                </div>
+                
+                <div class="content">
+                    <p><strong>${creatorName},</strong></p>
+                    
+                    <div class="highlight">
+                        <p><strong>📄 Ponencia:</strong> "${presentationTitle}"</p>
+                        <p><strong>🎯 Conferencia:</strong> "${conferenceTitle}"</p>
+                        <p><strong>📝 Estado:</strong> Aceptada con cambios requeridos</p>
+                    </div>
+                    
+                    <p>Su ponencia ha sido <strong>aceptada condicionalmente</strong>. Para que sea definitivamente aceptada, es necesario realizar algunos cambios.</p>
+                    
+                    <div class="changes-box">
+                        <p><strong>📋 Cambios requeridos por los revisores:</strong></p>
+                        <ul>
+                            ${requiredChangesHtml}
+                        </ul>
+                    </div>
+                    
+                    <p><strong>📌 Próximos pasos:</strong></p>
+                    <p>Por favor, regrese al sitio web para revisar los comentarios detallados y realizar los cambios necesarios. Una vez implementados los cambios, podrá reenviar su documento corregido.</p>
+                    
+                    <p>¡Estamos seguros de que con estos ajustes su ponencia será excelente!</p>
+                </div>
+                
+                <div class="footer">
+                    <p>📧 Este es un mensaje automático del sistema de gestión de conferencias</p>
+                    <p><strong>Equipo ProSTEM</strong></p>
+                </div>
+            </div>
+        </body>
+        </html>
+      `;
     }
 
-    // Include required changes in the email
-    const requiredChangesText = requiredChangesList.length > 0
-      ? `Los siguientes cambios son requeridos:\n- ${requiredChangesList.join("\n- ")}`
-      : "No se especificaron cambios requeridos.";
+    const mailOptions = {
+      from: process.env.EMAIL_FROM,
+      to: creatorEmail,
+      subject: emailSubject,
+      html: emailBody
+    };
 
-    emailBody = `
-      Estimado usuario,
-      
-      Su ponencia "${presentationTitle}" para la conferencia "${conferenceTitle}" fue aceptada con cambios requeridos. 
-      Por favor, regrese al sitio web para revisar los comentarios y realizar los cambios necesarios.
-
-      ${requiredChangesText}
-      
-      Atentamente,
-      El equipo de la conferencia
-    `;
+    await transporter.sendMail(mailOptions);
+    console.log(`Result email sent successfully to ${creatorEmail}: ${resultState}`);
+  } catch (error) {
+    console.error('Error sending result email:', error);
   }
-
-  await sendEmail(creatorEmail, emailSubject, emailBody);
 }
 
 // Helper function to send emails using the existing transporter
@@ -3778,39 +3918,88 @@ app.post('/api/filled-forms', async (req, res) => {
         if (!conferenceId) {
           return res.status(404).json({ error: 'Conference ID not found in presentation' });
         }
-
+      
         const conferenceRef = db.collection('conferences').doc(conferenceId);
         const conferenceDoc = await conferenceRef.get();
-
+      
         if (!conferenceDoc.exists) {
           return res.status(404).json({ error: 'Conference not found' });
         }
-
+      
         const conferenceData = conferenceDoc.data();
         const conferenceTitle = conferenceData.title;
         const managerId = conferenceData.managerId;
-
+      
         const managerRef = db.collection('users').doc(managerId);
         const managerDoc = await managerRef.get();
-
+      
         if (!managerDoc.exists) {
           return res.status(404).json({ error: 'Conference manager not found' });
         }
-
+      
         const managerEmail = managerDoc.get('email');
-
-        const emailSubject = 'Empate en los resultados de la revisión';
-        const emailBody = `
-          Estimado usuario,
-
-          La ponencia "${presentationData.title}" de la conferencia "${conferenceTitle}" fue revisada por los revisores que usted le asignó (${updatedReviewersAssigned.length} revisores). 
-          Sin embargo, hay un empate en los resultados de las revisiones (${acceptanceCount} aceptaciones vs ${rejectionCount} rechazos), por lo que se le solicita ingresar a la plataforma y agregar un revisor más para desempatar el resultado.
-
-          Atentamente,
-          El equipo de la conferencia
-        `;
-
-        await sendEmail(managerEmail, emailSubject, emailBody);
+        const managerName = managerDoc.get('name') || 'Estimado/a administrador/a de conferencia';
+      
+        // Use the same pattern as your working endpoint
+        const mailOptions = {
+          from: process.env.EMAIL_FROM,
+          to: managerEmail,
+          subject: 'Empate en los resultados de la revisión',
+          html: `
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="UTF-8">
+              <style>
+                  body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                  .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                  .header { background-color: #007bff; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }
+                  .content { background-color: #f9f9f9; padding: 30px; border-radius: 0 0 5px 5px; }
+                  .highlight { background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0; }
+                  .footer { text-align: center; margin-top: 20px; font-size: 14px; color: #666; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="header">
+                      <h2>🔄 Empate en Revisión de Ponencia</h2>
+                  </div>
+                  
+                  <div class="content">
+                      <p><strong>${managerName},</strong></p>
+                      
+                      <p>Le informamos que ha ocurrido un empate en los resultados de revisión de una ponencia:</p>
+                      
+                      <div class="highlight">
+                          <p><strong>📄 Ponencia:</strong> "${presentationData.title}"</p>
+                          <p><strong>🎯 Conferencia:</strong> "${conferenceTitle}"</p>
+                          <p><strong>👥 Revisores:</strong> ${updatedReviewersAssigned.length} revisores asignados</p>
+                          <p><strong>⚖️ Resultado:</strong> ${acceptanceCount} aceptación(es) vs ${rejectionCount} rechazo(s)</p>
+                      </div>
+                      
+                      <p><strong>¿Qué necesita hacer?</strong></p>
+                      <p>Para resolver este empate, es necesario que ingrese a la plataforma y asigne un revisor adicional que pueda desempatar el resultado.</p>
+                      
+                      <p>Este proceso garantiza una evaluación justa y equitativa de todas las ponencias presentadas.</p>
+                      
+                      <div style="text-align: center;">
+                          <p><em>Gracias por su atención y gestión oportuna.</em></p>
+                      </div>
+                  </div>
+                  
+                  <div class="footer">
+                      <p>📧 Este es un mensaje automático del sistema de gestión de conferencias</p>
+                      <p><strong>Equipo ProSTEM</strong></p>
+                  </div>
+              </div>
+          </body>
+          </html>
+          `
+        };
+      
+        // Use transporter.sendMail instead of sendEmail function
+        await transporter.sendMail(mailOptions);
+        console.log(`Tie-breaker email sent successfully to ${managerEmail}`);
       }
     }
 
@@ -5328,7 +5517,7 @@ app.post('/api/conferences/:id/generate-bulk-certificates', async (req, res) => 
           // Add "por haber participado como ponente en el"
           const participationText = "por haber participado como ponente en el";
           firstPage.drawText(participationText, {
-            x: width / 2 - (participationText.length * 2.5) + 20,
+            x: width / 2 - (participationText.length * 2.5) + 1,
             y: height - 320,
             size: 12,
             font: regularFont,
@@ -5460,6 +5649,7 @@ app.post('/api/conferences/:id/upload-signed-certificates', zipUpload.single('si
     
     const conferenceData = conferenceDoc.data();
     const conferenceTitle = conferenceData.title;
+    const conferenceCreationId = conferenceData.creationId; // Get conference creationId
     
     // Check if unsigned certificates were generated
     if (!conferenceData.certificatesGenerated) {
@@ -5491,7 +5681,6 @@ app.post('/api/conferences/:id/upload-signed-certificates', zipUpload.single('si
         // Only include presentations with DefinitiveState: true
         if (presentationData.DefinitiveState === true) {
           const authors = presentationData.authors || [];
-          const creationId = String(presentationData.creationId); // Convert to string
           
           authors.forEach(author => {
             // Extract name and email from author object
@@ -5503,8 +5692,7 @@ app.post('/api/conferences/:id/upload-signed-certificates', zipUpload.single('si
                 name: authorName,
                 email: authorEmail,
                 presentationId: presentationId,
-                presentationTitle: presentationData.title,
-                creationId: creationId
+                presentationTitle: presentationData.title
               });
             } else {
               console.error(`Author object missing name field:`, author);
@@ -5551,14 +5739,13 @@ app.post('/api/conferences/:id/upload-signed-certificates', zipUpload.single('si
       }
       
       try {
-        // Save the signed certificate to the presentation's folder
+        // Save all certificates in simplified route: uploads/conferences/(conferenceCreationId)/certificates
         const certificatePath = path.join(
           __dirname, 
           'uploads', 
-          conferenceId, 
-          String(matchingAuthor.creationId), // Ensure it's a string
-          'certificates', 
-          'signed'
+          'conferences',
+          String(conferenceCreationId),
+          'certificates'
         );
         
         // Ensure directory exists
@@ -5576,10 +5763,9 @@ app.post('/api/conferences/:id/upload-signed-certificates', zipUpload.single('si
           authorEmail: matchingAuthor.email,
           presentationId: matchingAuthor.presentationId,
           presentationTitle: matchingAuthor.presentationTitle,
-          creationId: matchingAuthor.creationId,
           originalFilename: filename,
           savedPath: savedFilePath,
-          relativePath: `uploads/${conferenceId}/${matchingAuthor.creationId}/certificates/signed/${savedFileName}`
+          relativePath: `uploads/conferences/${conferenceCreationId}/certificates/${savedFileName}`
         });
         
         console.log(`Saved certificate for ${matchingAuthor.name} (${matchingAuthor.email}) - matched from ${authorName}`);
