@@ -3,7 +3,15 @@ const express = require("express");
 const { admin, db, bucket } = require("./config/firebase");
 const cors = require("cors");
 const app = express();
-const multer = require("multer");
+
+const {
+  upload,
+  fileUpload,
+  paymentUpload,
+  zipUpload,
+  newsImageUpload,
+} = require('./middlewares/multer.middleware');
+
 const { DateTime } = require("luxon");
 const nodemailer = require("nodemailer");
 const cron = require("node-cron")
@@ -28,7 +36,7 @@ const PORT = process.env.PORT || 3000;
 const sharp = require("sharp");
 const resizeValue = 100; // This is to help save space on Firebase Storage.
 const qualityValue = 65; // From 0 to 100
-const upload = multer({ storage: multer.memoryStorage() });
+
 
 function getFullNameFromToken(decodedTokenName) {
   const parts = decodedTokenName.trim().split(/\s+/);
@@ -4179,56 +4187,7 @@ app.post('/api/create-reviewer', async (req, res) => {
 //################################################################################################
 
 
-// Configuración de Multer para manejar la subida de archivos
-const fileUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      const uploadPath = path.join(__dirname, 'uploads');
-      if (!fs.existsSync(uploadPath)) {
-        fs.mkdirSync(uploadPath, { recursive: true });
-      }
-      cb(null, uploadPath);
-    },
-    filename: (req, file, cb) => {
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-      cb(null, `${uniqueSuffix}-${file.originalname}`);
-    }
-  }),
-  fileFilter: (req, file, cb) => {
-    const allowedExtensions = ['.pdf', '.doc', '.docx', '.ppt', '.pptx'];
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (!allowedExtensions.includes(ext)) {
-      return cb(new Error('Only PDF, Word, and PowerPoint files are allowed'));
-    }
-    cb(null, true);
-  }
-});
 
-// Configuración de Multer específica para comprobantes de pago
-const paymentUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      const uploadPath = path.join(__dirname, 'uploads');
-      if (!fs.existsSync(uploadPath)) {
-        fs.mkdirSync(uploadPath, { recursive: true });
-      }
-      cb(null, uploadPath);
-    },
-    filename: (req, file, cb) => {
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-      cb(null, `${uniqueSuffix}-${file.originalname}`);
-    }
-  }),
-  fileFilter: (req, file, cb) => {
-    // Only allow JPG, JPEG, PNG, and PDF for payment receipts
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.pdf'];
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (!allowedExtensions.includes(ext)) {
-      return cb(new Error('Only JPG, JPEG, PNG, and PDF files are allowed for payment receipts'));
-    }
-    cb(null, true);
-  }
-});
 
 // Endpoint para crear una presentación con documentos
 app.post('/api/presentations', fileUpload.fields([
@@ -5347,31 +5306,7 @@ function findBestAuthorMatch(extractedName, expectedAuthors) {
   return null;
 }
 
-// Multer configuration for ZIP files
-const zipUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      const uploadPath = path.join(__dirname, 'uploads', 'temp');
-      if (!fs.existsSync(uploadPath)) {
-        fs.mkdirSync(uploadPath, { recursive: true });
-      }
-      cb(null, uploadPath);
-    },
-    filename: (req, file, cb) => {
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-      cb(null, `${uniqueSuffix}-${file.originalname}`);
-    }
-  }),
-  fileFilter: (req, file, cb) => {
-    // Only allow ZIP files
-    const allowedExtensions = ['.zip'];
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (!allowedExtensions.includes(ext)) {
-      return cb(new Error('Only ZIP files are allowed'));
-    }
-    cb(null, true);
-  }
-});
+
 
 // Endpoint to generate and download certificates for all speakers in a conference
 app.post('/api/conferences/:id/generate-bulk-certificates', async (req, res) => {
@@ -6322,30 +6257,7 @@ function normalizeString(str) {
     .trim();
 }
 
-// Multer configuration for news images
-const newsImageUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      // We'll create the directory based on newsId in the endpoint
-      cb(null, path.join(__dirname, 'uploads', 'temp'));
-    },
-    filename: (req, file, cb) => {
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-      cb(null, `${uniqueSuffix}-${file.originalname}`);
-    }
-  }),
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files (JPEG, PNG, GIF) are allowed'));
-    }
-  },
-  limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB limit per image
-  }
-});
+
 
 // Endpoint to send certificates via email to event participants
 app.post('/api/events/:id/send-certificates', async (req, res) => {
