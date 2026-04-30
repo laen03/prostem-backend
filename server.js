@@ -24,7 +24,7 @@ admin.initializeApp({
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
     privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
   }),
-  storageBucket: "prostem-db-68733.appspot.com",
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
 });
 
 
@@ -108,6 +108,17 @@ async function deleteCollectionInBatchesIterative(
     console.log(`Eliminados ${deletedCount} documentos de la subcolección...`);
   }
 }
+
+//Transporter to prepare the emails
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: false,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
 
 //SIGN UP WITH EMAIL & PASSWORD
 app.post(
@@ -1669,7 +1680,7 @@ app.post("/api/contact-us", async (request, response) => {
 
   try {
     const transporter = nodemailer.createTransport({
-      service: "gmail", // o el servicio que uses
+      service: "gmail", 
       auth: {
         user: process.env.CONTACT_EMAIL,
         pass: process.env.CONTACT_PASSWORD,
@@ -2329,24 +2340,7 @@ async function sendResultEmail(resultState, creatorId, presentationTitle, confer
   }
 }
 
-// Helper function to send emails using the existing transporter
-async function sendEmail(to, subject, body) {
-  try {
-    // Define the email options
-    const mailOptions = {
-      from: `"ProSTEM" <prostem.itcr@gmail.com>`, // Use the existing email
-      to, // Recipient email
-      subject, // Subject line
-      text: body, // Plain text body
-    };
 
-    // Send the email using the existing transporter
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`Email sent: ${info.messageId}`);
-  } catch (error) {
-    console.error("Error sending email:", error);
-  }
-}
 
 //Endpoint to modify a conference
 app.put("/api/conferences/:id", async (req, res) => {
@@ -3467,28 +3461,20 @@ app.get('/api/presentations/:presentationId/form', async (req, res) => {
 //########################################################################
 //Reminder email section
 
-//Transporter to prepare the emails
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: "prostem.itcr@gmail.com",
-    pass: "zevnywbizdymsuee"
-  }
-})
+
+
 
 //endpoint to send reminder email
 app.post("/api/send-reminder-email", async (req, res) =>{
   const {to, subject, text} = req.body
   try{
     const info = await transporter.sendMail({
-      from: "prostem.itcr@gmail.com",
+      from: process.env.EMAIL_FROM || process.env.SMTP_USER,
       to,
       subject,
-      text
-    })
+      text,
+    });
     console.log("Email sent: ", info.response),
     res.status(200).json({message: "Email sent", info})
   }catch(error){
@@ -3521,7 +3507,7 @@ cron.schedule("16 14 * * *", async () => {
         const user = userDoc.data();
 
         await transporter.sendMail({
-          from: "prostem.itcr@gmail.com",
+          from: process.env.EMAIL_FROM || process.env.SMTP_USER,
           to: user.email,
           subject: `Recordatorio evento próximo: ${event.title}`,
           text: `Hola, estimado/a ${user.name || ""}, ProSTEM le recuerda el evento ${event.title}, para el día de mañana a las ${event.startTime}` 
@@ -5958,7 +5944,7 @@ app.post('/api/conferences/:id/send-certificates', async (req, res) => {
         
         // Send email with certificate attachment
         const mailOptions = {
-          from: 'prostem.itcr@gmail.com',
+          from: process.env.EMAIL_FROM || process.env.SMTP_USER,
           to: emailData.authorEmail,
           subject: emailSubject,
           text: emailBody,
@@ -6466,15 +6452,6 @@ app.post('/api/events/:id/send-certificates', async (req, res) => {
     }
 
     // Send emails
-    const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 587,
-      secure: false, // Use STARTTLS
-      auth: {
-        user: "prostem.itcr@gmail.com",
-        pass: "zevnywbizdymsuee"
-      }
-    });
 
     let sentCount = 0;
 
