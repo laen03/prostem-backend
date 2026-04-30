@@ -1,5 +1,6 @@
 const express = require("express");
-const admin = require("firebase-admin");
+
+const { admin, db, bucket } = require("./config/firebase");
 const cors = require("cors");
 const app = express();
 const multer = require("multer");
@@ -18,22 +19,10 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 require("dotenv").config();
 
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-  }),
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-});
-
 
 //Initialize firebase admin
 const PORT = process.env.PORT || 3000;
-const db = admin.firestore();
-const bucket = admin
-  .storage()
-  .bucket("gs://prostem-db-68733.firebasestorage.app");
+
 
 //File middleware
 const sharp = require("sharp");
