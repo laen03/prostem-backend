@@ -11,6 +11,10 @@ const {
   newsImageUpload,
 } = require('./middlewares/multer.middleware');
 
+const { deleteCollectionInBatchesIterative } = require("./utils/batchDelete");
+
+const { getFullNameFromToken } = require("./utils/nameParser");
+
 const { DateTime } = require("luxon");
 
 const transporter = require("./config/mailer");
@@ -36,27 +40,6 @@ const resizeValue = 100; // This is to help save space on Firebase Storage.
 const qualityValue = 65; // From 0 to 100
 
 
-function getFullNameFromToken(decodedTokenName) {
-  const parts = decodedTokenName.trim().split(/\s+/);
-  let name = "",
-    lastName1 = "",
-    lastName2 = "";
-
-  if (parts.length === 1) {
-    name = parts[0];
-  } else if (parts.length === 2) {
-    [name, lastName1] = parts;
-  } else if (parts.length === 3) {
-    [name, lastName1, lastName2] = parts;
-  } else {
-    // Assume the name is everything except the last two parts of the string
-    name = parts.slice(0, -2).join(" ");
-    lastName1 = parts[parts.length - 2];
-    lastName2 = parts[parts.length - 1];
-  }
-
-  return { name, lastName1, lastName2 };
-}
 
 async function compressProfilePicture(multerFile, userUID) {
   //Compress the image
@@ -79,30 +62,6 @@ async function compressProfilePicture(multerFile, userUID) {
   return fileInBucket.publicUrl();
 }
 
-async function deleteCollectionInBatchesIterative(
-  collectionRef,
-  batchSize = 500
-) {
-  let deletedCount = 0;
-
-  while (true) {
-    const snapshot = await collectionRef.limit(batchSize).get();
-
-    if (snapshot.empty) {
-      break;
-    }
-
-    const batch = db.batch();
-    snapshot.docs.forEach((doc) => {
-      batch.delete(doc.ref);
-    });
-
-    await batch.commit();
-    deletedCount += snapshot.size;
-
-    console.log(`Eliminados ${deletedCount} documentos de la subcolección...`);
-  }
-}
 
 
 //SIGN UP WITH EMAIL & PASSWORD
@@ -1393,7 +1352,7 @@ app.delete("/api/delete-survey/:id", async (request, response) => {
 
     // Delete all answers on the "responses" subcolection
     const responsesRef = docRef.collection("responses");
-    await deleteCollectionInBatchesIterative(responsesRef);
+    await deleteCollectionInBatchesIterative(db, responsesRef);
 
     await docRef.delete();
 

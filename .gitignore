@@ -131,3 +131,7 @@ dist
 
 # User-generated content and uploads
 /uploads/
+
+# Firebase service account keys 
+*firebase-adminsdk*.json
+firebaseAdminConfig.json
