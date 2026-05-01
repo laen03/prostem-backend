@@ -13,7 +13,9 @@ const {
 } = require('./middlewares/multer.middleware');
 
 const { DateTime } = require("luxon");
-const nodemailer = require("nodemailer");
+
+const transporter = require("./config/mailer");
+
 const cron = require("node-cron")
 app.use(cors());
 app.use(express.json());
@@ -106,16 +108,6 @@ async function deleteCollectionInBatchesIterative(
   }
 }
 
-//Transporter to prepare the emails
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
 
 //SIGN UP WITH EMAIL & PASSWORD
 app.post(
@@ -1676,14 +1668,7 @@ app.post("/api/contact-us", async (request, response) => {
   }
 
   try {
-    const transporter = nodemailer.createTransport({
-      service: "gmail", 
-      auth: {
-        user: process.env.CONTACT_EMAIL,
-        pass: process.env.CONTACT_PASSWORD,
-      },
-    });
-
+    
     const mailOptions = {
       from: `"Usuario de la app ProSTEM" <${process.env.CONTACT_EMAIL}>`,
       to: process.env.CONTACT_EMAIL,
@@ -5090,125 +5075,7 @@ app.patch('/api/presentations/:presentationId/payment-status', async (req, res) 
   }
 });//##########################################3
 
-// Test endpoint for certificate generation
-app.post('/api/test-certificate', async (req, res) => {
-  try {
-    const { speaker_name, conference_title, presentation_title, conference_date } = req.body;
 
-    if (!speaker_name || !conference_title || !presentation_title || !conference_date) {
-      return res.status(400).json({ error: 'All fields are required' });
-    }
-
-    // Path to your template
-    const templatePath = path.join(__dirname, 'uploads', 'Certificate_template', 'Plantilla.pdf');
-    
-    // Check if template exists
-    try {
-      await require('fs').promises.access(templatePath);
-    } catch (error) {
-      return res.status(404).json({ error: 'Template not found at: ' + templatePath });
-    }
-
-    // Format the Costa Rican date
-    function formatCostaRicanDate(dateString) {
-      const date = new Date(dateString);
-      const months = [
-        'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
-        'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre'
-      ];
-      const day = date.getDate();
-      const month = months[date.getMonth()];
-      const year = date.getFullYear();
-      return `${day} de ${month} de ${year}`;
-    }
-
-    // Load PDF template
-    const templateBytes = await require('fs').promises.readFile(templatePath);
-    const pdfDoc = await require('pdf-lib').PDFDocument.load(templateBytes);
-    
-    // Get the first page
-    const pages = pdfDoc.getPages();
-    const firstPage = pages[0];
-    const { width, height } = firstPage.getSize();
-    
-    // Embed fonts
-    const boldFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.HelveticaBold);
-    const regularFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.Helvetica);
-    const italicFont = await pdfDoc.embedFont(require('pdf-lib').StandardFonts.HelveticaOblique);
-    
-   // Add speaker name (MORE CENTERED)
-    const fontSize = 25;
-    const speakerNameWidth = boldFont.widthOfTextAtSize(speaker_name, fontSize);
-    firstPage.drawText(speaker_name, {
-      x: (width - speakerNameWidth) / 2 + 15, // ← Changed from -1 to +5 (moves right)
-      y: height - 250,
-      size: fontSize,
-      font: boldFont,
-      color: require('pdf-lib').rgb(0, 0, 0),
-    });
-    // Add "por haber participado como ponente en el"
-    const participationText = "por haber participado como ponente en el";
-    firstPage.drawText(participationText, {
-      x: width / 2 - (participationText.length * 2.5),
-      y: height - 290,
-      size: 12,
-      font: regularFont,
-      color: require('pdf-lib').rgb(0, 0, 0),
-    });
-    
-    // Add conference title (UPPERCASE and BOLD)
-    const conferenceUpper = conference_title.toUpperCase();
-    firstPage.drawText(conferenceUpper, {
-      x: width / 2 - (conferenceUpper.length * 4),
-      y: height - 330,
-      size: 16,
-      font: boldFont,
-      color: require('pdf-lib').rgb(0, 0, 0),
-    });
-    
-    // Add "con el proyecto"
-    const projectText = "con el proyecto";
-    firstPage.drawText(projectText, {
-      x: width / 2 - (projectText.length * 2.5),
-      y: height - 360,
-      size: 10,
-      font: regularFont,
-      color: require('pdf-lib').rgb(0, 0, 0),
-    });
-    
-    // Add presentation title (ITALIC)
-    firstPage.drawText(presentation_title, {
-      x: width / 2 - (presentation_title.length * 3),
-      y: height - 390,
-      size: 12,
-      font: italicFont,
-      color: require('pdf-lib').rgb(0, 0, 0),
-    });
-    
-    // Add location and date
-    const formattedDate = formatCostaRicanDate(conference_date);
-    const locationDate = `San Carlos, ${formattedDate}`;
-    firstPage.drawText(locationDate, {
-      x: width / 2 - (locationDate.length * 3),
-      y: height - 450,
-      size: 12,
-      font: regularFont,
-      color: require('pdf-lib').rgb(0, 0, 0),
-    });
-    
-    // Save the PDF
-    const pdfBytes = await pdfDoc.save();
-    
-    // Send the PDF as response
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="certificado_test_${speaker_name.replace(/\s+/g, '_')}.pdf"`);
-    res.send(Buffer.from(pdfBytes));
-    
-  } catch (error) {
-    console.error('Error generating test certificate:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
-  }
-});
 
 // Improved author name extraction function
 function extractAuthorNameFromFilename(filename) {
@@ -5307,7 +5174,6 @@ function findBestAuthorMatch(extractedName, expectedAuthors) {
 }
 
 
-
 // Endpoint to generate and download certificates for all speakers in a conference
 app.post('/api/conferences/:id/generate-bulk-certificates', async (req, res) => {
   try {
@@ -5333,8 +5199,8 @@ app.post('/api/conferences/:id/generate-bulk-certificates', async (req, res) => 
     
     console.log(`Processing ${presentations.length} presentations for certificates`);
     
-    // Path to your PDF template
-    const templatePath = path.join(__dirname, 'uploads', 'Certificate_template', 'Plantilla.pdf');
+    // Path to certificate template
+    const templatePath = path.join(__dirname, 'assets', 'Certificate_template', 'Plantilla.pdf');
     
     // Check if template exists
     try {
@@ -5962,8 +5828,8 @@ app.post('/api/events/:id/generate-certificates', async (req, res) => {
 
     console.log(`Generating certificates for ${registeredUsers.length} users in event: ${eventTitle}`);
 
-    // Path to the certificate template
-    const templatePath = path.join(__dirname, 'uploads', 'Certificate_template', 'Plantilla.pdf');
+    // Path to certificate template
+    const templatePath = path.join(__dirname, 'assets', 'Certificate_template', 'Plantilla.pdf');
 
     // Check if the template exists
     try {
