@@ -1,8 +1,7 @@
-const express = require("express");
 
 const { admin, db, bucket } = require("./config/firebase");
-const cors = require("cors");
-const app = express();
+
+const app = require("./app");
 
 const {
   upload,
@@ -17,9 +16,6 @@ const { DateTime } = require("luxon");
 const transporter = require("./config/mailer");
 
 const cron = require("node-cron")
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 require("dotenv").config(); // carga las variables de .env
 const path = require('path');
 const fs = require('fs');

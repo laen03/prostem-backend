@@ -129,8 +129,5 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-// ...existing code...
-.pnp.*
-
 # User-generated content and uploads
 /uploads/
